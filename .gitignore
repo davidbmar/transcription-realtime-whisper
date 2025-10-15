@@ -1,0 +1,86 @@
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+!server.key
+*.crt
+!server.crt
+
+# Runtime state
+artifacts/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.rmir
+*.riva
+models/
+*.tar.gz
+
+# Temporary files
+*.tmp
+.lock/
+note.txt
+
+# ============================================================================
+# Audio-API (Node.js / TypeScript / Serverless)
+# ============================================================================
+
+# Node.js
+node_modules/
+package-lock.json
+
+# TypeScript
+dist/
+build/
+*.tsbuildinfo
+
+# Serverless Framework
+.serverless/
+.esbuild/
+
+# Audio files (test data)
+*.wav
+*.mp3
+*.webm
+*.ogg
+test_audio/
+sample_audio/
+
+# AWS
+*.zip
+cdk.out/
+
+# Testing
+coverage/
+.nyc_output/
+test-results/
+
+# Keep important docs
+!INTEGRATION_ANALYSIS.md
+!DEPLOYMENT_SUMMARY.md
+!README.md

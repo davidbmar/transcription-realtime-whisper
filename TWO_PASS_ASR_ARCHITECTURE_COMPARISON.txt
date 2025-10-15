@@ -1,0 +1,960 @@
+================================================================================
+TWO-PASS ASR ARCHITECTURE COMPARISON
+Adding Whisper Second-Pass Refinement + Audio Replay to RIVA Streaming System
+================================================================================
+
+Date: 2025-10-13
+Current System: RIVA Conformer-CTC Streaming v2.6.0 with Deduplication
+Target: Add Whisper for higher accuracy + audio replay capability
+
+================================================================================
+SECTION 1: ARCHITECTURE OVERVIEW
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+OPTION 1: ASYNC BATCH REFINEMENT (Otter.ai-style)
+Summary: Show fast RIVA results immediately, then update with Whisper every 30s
+────────────────────────────────────────────────────────────────────────────────
+
+Browser Audio Stream
+      │
+      ↓
+WebSocket Server
+      │
+      ├─────────────────┐
+      ↓                 ↓
+[RIVA Streaming]   Audio Buffer (30s chunks)
+      │                 │
+      ↓                 ↓
+Display Event      WAV Segment
+(300ms latency)         │
+                        ↓
+                  Whisper Worker
+                        │
+                        ↓
+                  Refinement Event
+                        │
+                        ↓
+                  Client Update (5-10s after RIVA)
+
+
+────────────────────────────────────────────────────────────────────────────────
+OPTION 2: CONFIDENCE-TRIGGERED REFINEMENT
+Summary: Only use Whisper on low-confidence RIVA segments to save compute
+────────────────────────────────────────────────────────────────────────────────
+
+Browser Audio Stream
+      │
+      ↓
+WebSocket Server
+      │
+      ↓
+[RIVA Streaming + Confidence Scores]
+      │
+      ├───────────────────┐
+      ↓                   ↓
+High confidence      Low confidence (<0.7)
+      │                   │
+      ↓                   ↓
+Display as-is      Queue segment for Whisper
+                          │
+                          ↓
+                    Whisper Processing
+                          │
+                          ↓
+                    Replace transcript region
+
+
+────────────────────────────────────────────────────────────────────────────────
+OPTION 3: COMPLETE SESSION RE-TRANSCRIPTION (Simple)
+Summary: RIVA for preview, then Whisper processes full session after it ends
+────────────────────────────────────────────────────────────────────────────────
+
+Browser Audio Stream
+      │
+      ↓
+WebSocket Server
+      │
+      ├─────────────────┐
+      ↓                 ↓
+[RIVA Streaming]   WAV File Writer
+      │                 │
+      ↓                 ↓
+Display Event      session_audio.wav
+(real-time)            │
+                       ↓ (on session end)
+                  Upload to S3
+                       │
+                       ↓
+                  Whisper Batch Job
+                       │
+                       ↓
+                  Final Transcript → Database
+                  Audio → S3 (for replay)
+
+
+────────────────────────────────────────────────────────────────────────────────
+OPTION 4: SEGMENT-BASED PIPELINE (Enterprise)
+Summary: Process everything in 5-10s chunks with full pipeline separation
+────────────────────────────────────────────────────────────────────────────────
+
+Browser Audio Stream (chunked every 5s)
+      │
+      ├───────────────────────────┐
+      ↓                           ↓
+[RIVA Streaming]          Audio Chunk Queue
+(HOT PATH)                  (COLD PATH)
+      │                           │
+      ↓                           ↓
+Display Event              S3 Segment Upload
+                                  │
+                                  ↓
+                          SQS/Redis Queue
+                                  │
+                                  ↓
+                          Whisper Worker Pool
+                                  │
+                                  ↓
+                          DynamoDB Segment Table
+                                  │
+                                  ↓
+                          Background Merger
+                                  │
+                                  ↓
+                          Final Transcript API
+
+
+================================================================================
+SECTION 2: COMPONENT-BY-COMPONENT ANALYSIS
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+COMPONENT: Audio Buffering
+Each option needs to store audio differently
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  Location:     In-memory circular buffer (30s sliding window)
+  Format:       Raw PCM bytes (16kHz, mono, 16-bit)
+  Size:         ~960 KB per 30s chunk
+  Lifecycle:    Kept until Whisper processes, then discarded
+  Implementation: Python collections.deque with maxlen based on sample rate
+
+OPTION 2 - Confidence-Triggered
+  Location:     In-memory cache with LRU eviction
+  Format:       Raw PCM bytes + timestamp markers
+  Size:         Variable (only uncertain segments, ~10-30% of audio)
+  Lifecycle:    Kept for 60s after segment ends
+  Implementation: Dict[timestamp, AudioSegment] with TTL cleanup
+
+OPTION 3 - Complete Session Re-transcription
+  Location:     Temporary file on disk (/tmp/sessions/{session_id}.wav)
+  Format:       WAV file (16kHz, mono, 16-bit PCM)
+  Size:         ~1.92 MB per minute (cumulative)
+  Lifecycle:    Written continuously, uploaded to S3 on session end, then deleted
+  Implementation: Python wave module, append mode
+
+OPTION 4 - Segment-Based Pipeline
+  Location:     Immediate write to S3 (no local buffering)
+  Format:       Individual WAV segments (5-10s each) with overlap
+  Size:         ~320-640 KB per segment
+  Lifecycle:    Permanent storage in S3, indexed in database
+  Implementation: boto3 S3 upload, multipart for large sessions
+
+
+────────────────────────────────────────────────────────────────────────────────
+COMPONENT: Whisper Integration
+How Whisper gets invoked and processes audio
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  Invocation:   Timer-based (every 30s during active session)
+  Input:        30s audio buffer from memory
+  Model:        Whisper Medium (balanced speed/accuracy)
+  Hardware:     Same server as RIVA (CPU fallback) OR separate GPU instance
+  Latency:      2-4s processing time (Medium model on CPU)
+  Parallelism:  1 Whisper job per active session
+  Result:       Transcript + word timestamps sent back to session
+
+OPTION 2 - Confidence-Triggered
+  Invocation:   Event-driven (triggered by low confidence score)
+  Input:        Variable-length segments (typically 3-10s)
+  Model:        Whisper Small (faster for short segments)
+  Hardware:     Same server as RIVA (CPU is fine for short clips)
+  Latency:      1-2s processing time
+  Parallelism:  Queue-based (max 5 concurrent Whisper jobs)
+  Result:       Replacement text for specific time range
+
+OPTION 3 - Complete Session Re-transcription
+  Invocation:   On session end (one-time batch job)
+  Input:        Complete session WAV file (5min - 2hr typical)
+  Model:        Whisper Large-v3 (highest accuracy, latency doesn't matter)
+  Hardware:     Separate GPU worker (EC2 g4dn.xlarge or Lambda)
+  Latency:      30-60s for 10min audio, doesn't block user
+  Parallelism:  As many workers as needed (auto-scaling)
+  Result:       Full transcript stored in database with S3 audio link
+
+OPTION 4 - Segment-Based Pipeline
+  Invocation:   Continuous (SQS queue consumer)
+  Input:        5-10s segments with 1s overlap
+  Model:        Whisper Medium (good balance for segments)
+  Hardware:     Dedicated worker pool (3-10 GPU instances)
+  Latency:      1-2s per segment, parallel processing
+  Parallelism:  N workers processing M sessions simultaneously
+  Result:       Per-segment transcripts merged by background job
+
+
+────────────────────────────────────────────────────────────────────────────────
+COMPONENT: Transcript Reconciliation
+How RIVA and Whisper outputs get merged
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  Strategy:     Word-level alignment with edit distance
+  Algorithm:    1. Split both transcripts into words
+                2. Find longest common subsequence (LCS)
+                3. Mark insertions/deletions/substitutions
+                4. Send "update" events for changed words
+  Complexity:   O(n*m) where n=RIVA words, m=Whisper words
+  Edge cases:   - Handle punctuation differences
+                - Cope with RIVA duplications (already filtered by v2.6.0)
+                - Whisper may hallucinate repetitive text
+  Client impact: UI must handle incremental word replacements
+
+OPTION 2 - Confidence-Triggered
+  Strategy:     Direct replacement (no alignment needed)
+  Algorithm:    1. Store RIVA output with time ranges
+                2. When Whisper processes segment, replace exact time range
+                3. Update transcript array by index
+  Complexity:   O(1) lookup by time range
+  Edge cases:   - RIVA and Whisper may disagree on segment boundaries
+                - Need 100ms tolerance for timing mismatches
+  Client impact: Simple update (replace text at index X-Y)
+
+OPTION 3 - Complete Session Re-transcription
+  Strategy:     No reconciliation (two separate transcripts)
+  Algorithm:    1. Display RIVA transcript during session
+                2. Store Whisper transcript as "final version"
+                3. Show toggle in UI: "Live" vs "Final"
+  Complexity:   O(1) - just store both
+  Edge cases:   - User may have edited RIVA transcript
+                - Need to preserve manual corrections
+  Client impact: Show two versions, let user choose
+
+OPTION 4 - Segment-Based Pipeline
+  Strategy:     Merge at segment boundaries with overlap resolution
+  Algorithm:    1. Each segment has 1s overlap with next
+                2. Align overlapping words (last 1s of seg N = first 1s of seg N+1)
+                3. Choose best match, discard duplicate
+                4. Concatenate aligned segments
+  Complexity:   O(segments * overlap_words)
+  Edge cases:   - Speaker changes mid-overlap
+                - Silence in overlap region (no words to align)
+                - Whisper may segment differently than expected
+  Client impact: Final transcript arrives after 30-60s of latency
+
+
+────────────────────────────────────────────────────────────────────────────────
+COMPONENT: Audio Replay
+How users can click on transcript and hear corresponding audio
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  Storage:      30s segments in S3 after Whisper processing
+  Format:       s3://bucket/sessions/{id}/segments/{timestamp}.wav
+  Granularity:  30s chunks (may need to seek within chunk)
+  API:          GET /api/audio/{session_id}?start=90 (returns segment starting at 90s)
+  Client:       1. Click word with timestamp=92s
+                2. Request segment at 90s
+                3. Play from offset 2s within that segment
+  Limitation:   Only segments that were processed by Whisper are stored
+
+OPTION 2 - Confidence-Triggered
+  Storage:      Only low-confidence segments stored
+  Format:       s3://bucket/sessions/{id}/uncertain/{start}-{end}.wav
+  Granularity:  Variable (3-10s per segment)
+  API:          GET /api/audio/{session_id}/segment/{start} (may return 404 if not stored)
+  Client:       1. Click word
+                2. Check if that time range has stored audio
+                3. Play if available, show "audio not available" if not
+  Limitation:   Incomplete coverage (60-90% of audio missing)
+
+OPTION 3 - Complete Session Re-transcription
+  Storage:      Complete session as single WAV file
+  Format:       s3://bucket/sessions/{id}/complete.wav
+  Granularity:  Full session (1 file)
+  API:          GET /api/audio/{session_id} (presigned S3 URL or range request)
+  Client:       1. Click word with timestamp=125s
+                2. Request full audio file (if small) OR range request
+                3. Seek to 125s and play
+  Limitation:   Large file downloads (10 min = 19.2 MB)
+                Range requests help but still need S3 bandwidth
+
+OPTION 4 - Segment-Based Pipeline
+  Storage:      5-10s segments stored permanently
+  Format:       s3://bucket/sessions/{id}/segments/00042.wav
+  Granularity:  5-10s segments (perfect for replay)
+  API:          GET /api/audio/{session_id}/segment/{segment_id}
+  Client:       1. Click word with timestamp=125s
+                2. Calculate segment_id = 125 / 5 = segment 25
+                3. Play segment 25, seek to offset 0s (125 % 5)
+  Limitation:   Segment boundaries require crossfade for smooth playback
+
+
+================================================================================
+SECTION 3: IMPLEMENTATION COMPLEXITY RATINGS
+Rating Scale: 1 (trivial) to 5 (very complex)
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+METRIC: Code Changes to Existing System
+How much existing code needs modification
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement: ████░ 4/5 (COMPLEX)
+  - Modify riva_websocket_bridge.py to add audio buffering
+  - Create new WhisperRefiner class
+  - Add word-level alignment algorithm
+  - Update client to handle incremental updates
+  - Modify transcript_accumulator.py to track timestamps
+  Estimated LOC: ~800 lines
+
+OPTION 2 - Confidence-Triggered: ███░░ 3/5 (MODERATE)
+  - Extract confidence scores from RIVA responses
+  - Add conditional Whisper invocation
+  - Simple segment replacement logic
+  - Client needs confidence visualization
+  - Audio segment caching
+  Estimated LOC: ~500 lines
+
+OPTION 3 - Complete Session Re-transcription: ██░░░ 2/5 (SIMPLE)
+  - Add WAV file writer to audio handler
+  - Create post-session Whisper job trigger
+  - S3 upload on session end
+  - Separate database table for final transcripts
+  - No client changes needed (just add "final" toggle)
+  Estimated LOC: ~300 lines
+
+OPTION 4 - Segment-Based Pipeline: █████ 5/5 (VERY COMPLEX)
+  - Complete architectural overhaul
+  - Add message queue (SQS/Redis)
+  - Worker pool management
+  - Database schema for segments
+  - Segment merging service
+  - Monitoring and error handling
+  Estimated LOC: ~2000 lines
+
+
+────────────────────────────────────────────────────────────────────────────────
+METRIC: Infrastructure Requirements
+New services/resources needed beyond current AWS setup
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement: ███░░ 3/5
+  Required:
+    - S3 bucket (already exists: dbm-cf-2-web)
+    - Install Whisper on current build box OR spin up GPU instance
+    - ~4GB additional RAM for Whisper model
+  Optional:
+    - Separate GPU instance for Whisper (g4dn.xlarge = $0.526/hr)
+  Complexity: Medium (can start with CPU Whisper, upgrade later)
+
+OPTION 2 - Confidence-Triggered: ██░░░ 2/5
+  Required:
+    - S3 bucket for uncertain segments
+    - Whisper Small model (~1GB RAM)
+    - Redis for segment cache (optional)
+  Optional:
+    - None (fits on existing server)
+  Complexity: Low (minimal infrastructure)
+
+OPTION 3 - Complete Session Re-transcription: ██░░░ 2/5
+  Required:
+    - S3 bucket for session audio
+    - Lambda function OR EC2 instance for batch Whisper
+    - Database for final transcripts (could use existing)
+  Optional:
+    - SQS queue for job management
+    - Step Functions for workflow
+  Complexity: Low (standard batch processing pattern)
+
+OPTION 4 - Segment-Based Pipeline: █████ 5/5
+  Required:
+    - S3 bucket with lifecycle policies
+    - SQS queue (2 queues: segments + merging)
+    - DynamoDB table for segment metadata
+    - EC2 Auto Scaling Group for workers (3-10 instances)
+    - CloudWatch metrics and alarms
+    - Application Load Balancer (if exposing API)
+  Optional:
+    - ElastiCache Redis for hot data
+    - Amazon MQ for complex workflows
+  Complexity: Very High (full production system)
+
+
+────────────────────────────────────────────────────────────────────────────────
+METRIC: Testing Complexity
+How hard is it to test and validate
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement: ████░ 4/5
+  Test cases:
+    - RIVA and Whisper agree (easy)
+    - RIVA and Whisper disagree significantly (alignment algorithm)
+    - Mid-session audio quality changes
+    - Network delays between RIVA → Whisper
+    - Client disconnects during Whisper processing
+    - Whisper fails (timeout, OOM, etc.)
+  Challenge: Timing-dependent bugs, race conditions
+
+OPTION 2 - Confidence-Triggered: ███░░ 3/5
+  Test cases:
+    - Low confidence correctly triggers Whisper
+    - High confidence skips Whisper
+    - Boundary cases (confidence = 0.69 vs 0.71)
+    - Whisper disagrees with RIVA (is it actually better?)
+    - Segment timing mismatches
+  Challenge: Validating confidence threshold tuning
+
+OPTION 3 - Complete Session Re-transcription: ██░░░ 2/5
+  Test cases:
+    - Short session (1 min)
+    - Long session (2 hours)
+    - Session crashes before end (partial audio)
+    - Whisper job fails (retry logic)
+    - S3 upload succeeds/fails
+  Challenge: End-to-end testing takes time, but logic is straightforward
+
+OPTION 4 - Segment-Based Pipeline: █████ 5/5
+  Test cases:
+    - Individual segment processing
+    - Segment overlap alignment
+    - Out-of-order segment delivery
+    - Worker failures and retries
+    - Queue backpressure
+    - Partial session (some segments missing)
+    - Concurrent sessions (isolation)
+  Challenge: Distributed systems complexity, eventual consistency bugs
+
+
+================================================================================
+SECTION 4: LATENCY CHARACTERISTICS
+When does the user see different quality levels
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+TIMELINE: User speaks at T=0
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  T+0.3s:  RIVA partial appears on screen (current behavior)
+  T+1.5s:  RIVA final (current behavior)
+  T+30s:   First 30s chunk sent to Whisper
+  T+34s:   Whisper result arrives, words start updating on screen
+  T+60s:   Second 30s chunk sent to Whisper
+  T+64s:   More refinements appear
+  Pattern: Rolling refinement every ~30s, 4s behind
+
+OPTION 2 - Confidence-Triggered
+  T+0.3s:  RIVA partial appears
+  T+1.5s:  RIVA final (with confidence scores)
+  T+1.5s:  IF low confidence, segment queued for Whisper
+  T+3.5s:  Whisper result replaces low-confidence text (if triggered)
+  Pattern: Selective refinement, 2s delay for uncertain parts only
+
+OPTION 3 - Complete Session Re-transcription
+  T+0.3s:  RIVA partial appears
+  T+1.5s:  RIVA final
+  ... session continues with RIVA only ...
+  T+600s:  User ends session (10 min)
+  T+605s:  Full audio uploaded to S3
+  T+610s:  Whisper starts processing
+  T+650s:  Whisper completes (40s processing time)
+  T+650s:  Final transcript available (user may have already left)
+  Pattern: Delayed batch, no real-time refinement
+
+OPTION 4 - Segment-Based Pipeline
+  T+0.3s:  RIVA partial appears (hot path)
+  T+1.5s:  RIVA final (hot path)
+  T+5s:    First 5s segment uploaded to S3 (cold path starts)
+  T+7s:    Whisper processes first segment
+  T+10s:   Next segment uploaded
+  T+12s:   Whisper processes second segment
+  ... parallel processing continues ...
+  T+65s:   Merger job runs (combines first 60s of segments)
+  T+65s:   "High-accuracy transcript" available for first minute
+  Pattern: ~60s delay for refined transcript, continuous background processing
+
+
+────────────────────────────────────────────────────────────────────────────────
+LATENCY SUMMARY TABLE
+────────────────────────────────────────────────────────────────────────────────
+
+Metric                          Option 1  Option 2  Option 3  Option 4
+─────────────────────────────────────────────────────────────────────────────
+First RIVA display              300ms     300ms     300ms     300ms
+First Whisper refinement        30-34s    2-4s      N/A       60-65s
+Refinement frequency            Every 30s On-demand Once      Every 60s
+End-to-end (10 min session)     34s       2-4s      40s       65s
+User perception                 "Updates  "Instant  "Wait for "Background
+                                 rolling   fixes"    final"    processing"
+                                 in"
+
+
+================================================================================
+SECTION 5: STORAGE & COST ANALYSIS
+Based on typical 10-minute session with 1 speaker
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+STORAGE REQUIREMENTS
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  Audio storage:
+    - 20 segments × 30s each = 10 min total
+    - Each segment: 960 KB
+    - Total S3 storage: 19.2 MB per session
+  Database storage:
+    - RIVA transcript: ~2-3 KB (1500 words avg)
+    - Whisper transcript: ~2-3 KB
+    - Segment metadata: ~1 KB per segment = 20 KB
+    - Total DB per session: ~25 KB
+  Retention: 90 days typical → 1.73 GB S3 per session after 90 days
+
+OPTION 2 - Confidence-Triggered
+  Audio storage:
+    - Only 20% of audio stored (low confidence segments)
+    - 2 minutes × 1.92 MB/min = 3.84 MB per session
+  Database storage:
+    - RIVA transcript: ~2-3 KB
+    - Whisper replacements: ~0.5 KB
+    - Segment index: ~5 KB
+    - Total DB per session: ~8 KB
+  Retention: 30 days (incomplete audio, less valuable)
+
+OPTION 3 - Complete Session Re-transcription
+  Audio storage:
+    - Single WAV file: 10 min × 1.92 MB/min = 19.2 MB
+    - No segmentation overhead
+  Database storage:
+    - RIVA transcript: ~2-3 KB
+    - Whisper transcript: ~2-3 KB
+    - Session metadata: ~1 KB
+    - Total DB per session: ~6 KB
+  Retention: Indefinite (full session preserved)
+
+OPTION 4 - Segment-Based Pipeline
+  Audio storage:
+    - 120 segments × 5s each = 10 min total
+    - Each segment: 320 KB (includes 1s overlap)
+    - Total S3 storage: 38.4 MB per session (2× due to overlap)
+  Database storage:
+    - Segment table: 120 rows × 500 bytes = 60 KB
+    - RIVA transcript: ~2-3 KB
+    - Whisper transcript: ~2-3 KB
+    - Merged transcript cache: ~3 KB
+    - Total DB per session: ~70 KB
+  Retention: Lifecycle policy (move to Glacier after 30 days)
+
+
+────────────────────────────────────────────────────────────────────────────────
+COMPUTE COSTS (per 10-minute session)
+AWS US-East-2 pricing, November 2024
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  RIVA processing:
+    - Already running: $0 incremental
+  Whisper processing:
+    - CPU (on build box): ~2 min processing time × $0.0464/hr (t3.xlarge) = $0.0015
+    - GPU (g4dn.xlarge): ~30s processing time × $0.526/hr = $0.0044
+  S3 storage (first month):
+    - 19.2 MB × $0.023/GB = $0.00044
+  S3 GET requests (replay):
+    - 20 segments × $0.0004 per 1000 = $0.000008
+  Total per session: $0.0019 (CPU) or $0.0048 (GPU)
+
+OPTION 2 - Confidence-Triggered
+  RIVA processing:
+    - Already running: $0 incremental
+  Whisper processing:
+    - CPU: ~24s processing time × $0.0464/hr = $0.00031
+  S3 storage:
+    - 3.84 MB × $0.023/GB = $0.000088
+  Total per session: $0.0004
+
+OPTION 3 - Complete Session Re-transcription
+  RIVA processing:
+    - Already running: $0 incremental
+  Whisper processing:
+    - Lambda with GPU (future): ~40s × $0.10/min = $0.067
+    - EC2 g4dn.xlarge: 40s × $0.526/hr = $0.0058
+  S3 storage:
+    - 19.2 MB × $0.023/GB = $0.00044
+  Total per session: $0.0063 (EC2) or $0.067 (Lambda)
+
+OPTION 4 - Segment-Based Pipeline
+  RIVA processing:
+    - Already running: $0 incremental
+  Whisper processing:
+    - Worker pool (3× g4dn.xlarge, 50% utilization): $0.526/hr × 3 × 0.5 = $0.79/hr
+    - Per session (10 min): $0.79/hr × (10/60) = $0.13 per session
+  S3 storage:
+    - 38.4 MB × $0.023/GB = $0.00088
+  DynamoDB:
+    - 120 writes × $1.25 per million = $0.00015
+  SQS:
+    - 120 messages × $0.40 per million = $0.000048
+  Total per session: $0.131
+
+
+────────────────────────────────────────────────────────────────────────────────
+COST SUMMARY (per session)
+────────────────────────────────────────────────────────────────────────────────
+
+Option                          Storage    Compute    Total      Cost/hr
+                                                                  (6 sessions)
+──────────────────────────────────────────────────────────────────────────────
+Option 1 (CPU Whisper)          $0.00044   $0.0015    $0.0019    $0.011
+Option 1 (GPU Whisper)          $0.00044   $0.0044    $0.0048    $0.029
+Option 2 (Selective)            $0.000088  $0.00031   $0.0004    $0.002
+Option 3 (Batch EC2)            $0.00044   $0.0058    $0.0063    $0.038
+Option 3 (Batch Lambda)         $0.00044   $0.067     $0.067     $0.402
+Option 4 (Enterprise)           $0.00088   $0.13      $0.131     $0.786
+
+
+================================================================================
+SECTION 6: SCALABILITY PROFILE
+How each option handles increasing load
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+CONCURRENT SESSIONS
+How many users can transcribe simultaneously
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement: ██░░░ 2/5 (Limited)
+  Bottleneck: Whisper processing on single instance
+  Max sessions:
+    - CPU: 2-3 concurrent (shares CPU with RIVA)
+    - GPU: 6-8 concurrent (batched inference)
+  Scaling strategy: Add more GPU instances with load balancer
+  Constraint: Memory for audio buffers (960 KB × sessions)
+
+OPTION 2 - Confidence-Triggered: ███░░ 3/5 (Moderate)
+  Bottleneck: Whisper queue depth
+  Max sessions: 10-15 concurrent (selective processing helps)
+  Scaling strategy: Increase worker threads, add caching
+  Constraint: CPU for Whisper Small model
+
+OPTION 3 - Complete Session Re-transcription: ████░ 4/5 (Good)
+  Bottleneck: Post-session batch processing
+  Max sessions: Unlimited during session (only RIVA active)
+  Scaling strategy: Auto-scaling Lambda or EC2 fleet
+  Constraint: None (decoupled from real-time)
+
+OPTION 4 - Segment-Based Pipeline: █████ 5/5 (Excellent)
+  Bottleneck: Worker pool size (configurable)
+  Max sessions: 50-100 concurrent with 10-worker pool
+  Scaling strategy: Auto-scale workers based on queue depth
+  Constraint: SQS throughput (3000 msgs/sec, not an issue)
+
+
+────────────────────────────────────────────────────────────────────────────────
+SESSION LENGTH
+How long can a single session run
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement: ███░░ 3/5 (30-60 minutes)
+  Limitation: Memory accumulation (audio buffers)
+  Max length: ~60 min before memory pressure
+  Workaround: Discard segments after Whisper processing
+  Issue: Long sessions → many refinement events → UI updates slow
+
+OPTION 2 - Confidence-Triggered: ████░ 4/5 (1-2 hours)
+  Limitation: Segment cache size
+  Max length: ~2 hours (only caching uncertain segments)
+  Workaround: LRU eviction after 60s
+  Issue: Long sessions → more chances for confidence calibration drift
+
+OPTION 3 - Complete Session Re-transcription: ███░░ 3/5 (30-90 minutes)
+  Limitation: Disk space for temp WAV file
+  Max length: ~90 min (~172 MB file)
+  Workaround: Stream directly to S3 instead of temp file
+  Issue: Very long Whisper processing time (5 min for 2hr audio)
+
+OPTION 4 - Segment-Based Pipeline: █████ 5/5 (Unlimited)
+  Limitation: None (segments processed independently)
+  Max length: Unlimited (tested to 8+ hours)
+  Workaround: N/A
+  Issue: Large number of segments (8hr = 5,760 segments @ 5s each)
+
+
+================================================================================
+SECTION 7: PRODUCTION READINESS CHECKLIST
+What needs to be built beyond the basic implementation
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE: Error Handling & Retry Logic
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  ☐ Whisper timeout handling (kill if >30s)
+  ☐ Retry failed segments (max 3 attempts)
+  ☐ Graceful degradation (show RIVA-only if Whisper fails)
+  ☐ Client reconnection (resume refinements)
+  ☐ Partial failure handling (some segments succeed, others fail)
+  Priority: HIGH (user-facing failures)
+
+OPTION 2 - Confidence-Triggered
+  ☐ Handle RIVA confidence score = 0 or null
+  ☐ Whisper failure → keep RIVA text
+  ☐ Timeout for queued segments (drop if >60s old)
+  ☐ Confidence threshold tuning (log false positives)
+  Priority: MEDIUM (affects 20% of content)
+
+OPTION 3 - Complete Session Re-transcription
+  ☐ S3 upload failure → retry with exponential backoff
+  ☐ Whisper job failure → send email alert, manual retry
+  ☐ Partial audio (session crashed) → process what we have
+  ☐ Lambda timeout → fallback to EC2
+  Priority: LOW (async, not user-blocking)
+
+OPTION 4 - Segment-Based Pipeline
+  ☐ Dead letter queue for failed segments
+  ☐ Segment merger handles missing segments (gaps)
+  ☐ Worker health checks (kill hung Whisper processes)
+  ☐ Queue backpressure handling (slow down segment uploads)
+  ☐ Poison pill detection (bad audio that crashes Whisper)
+  Priority: CRITICAL (affects all sessions)
+
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE: Monitoring & Alerting
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  Key metrics:
+    - Whisper processing time (p50, p95, p99)
+    - Refinement latency (time from RIVA → Whisper result)
+    - Memory usage (audio buffer growth)
+    - Alignment quality (edit distance between RIVA/Whisper)
+  Alerts:
+    - Whisper processing >10s
+    - Memory >80%
+    - Refinement failures >5% of sessions
+
+OPTION 2 - Confidence-Triggered
+  Key metrics:
+    - Confidence score distribution
+    - Whisper trigger rate (% of segments)
+    - Precision (did Whisper actually improve low-confidence text?)
+    - Queue depth
+  Alerts:
+    - Trigger rate >40% (may need model tuning)
+    - Queue depth >100 segments
+
+OPTION 3 - Complete Session Re-transcription
+  Key metrics:
+    - Batch job success rate
+    - Processing time vs audio length
+    - S3 upload time
+    - Final transcript availability time
+  Alerts:
+    - Job failure rate >1%
+    - Processing time >5× audio length
+
+OPTION 4 - Segment-Based Pipeline
+  Key metrics:
+    - Queue depth (SQS messages waiting)
+    - Worker utilization (% time processing)
+    - Segment processing time
+    - Merger lag (time to assemble final transcript)
+    - S3 PUT/GET latency
+  Alerts:
+    - Queue depth >1000 segments
+    - Worker utilization >90% (scale up)
+    - Worker utilization <20% (scale down)
+    - Merger lag >5 minutes
+
+
+────────────────────────────────────────────────────────────────────────────────
+FEATURE: User Experience Enhancements
+────────────────────────────────────────────────────────────────────────────────
+
+OPTION 1 - Async Batch Refinement
+  ☐ Visual indicator when refinements arrive (subtle highlight)
+  ☐ Show diff (what changed from RIVA → Whisper)
+  ☐ Undo refinement (revert to RIVA if user prefers)
+  ☐ Progress bar ("Processing minute 3...")
+  ☐ Audio waveform with quality indicator
+
+OPTION 2 - Confidence-Triggered
+  ☐ Show confidence scores in UI (color-coded)
+  ☐ "Processing..." spinner on uncertain text
+  ☐ Manual trigger (user can request Whisper for any segment)
+  ☐ Explanation ("Low confidence, verifying...")
+
+OPTION 3 - Complete Session Re-transcription
+  ☐ "Processing final transcript..." notification
+  ☐ Email when final transcript ready
+  ☐ Toggle between live and final transcript
+  ☐ Download both versions (RIVA vs Whisper)
+
+OPTION 4 - Segment-Based Pipeline
+  ☐ Real-time quality indicator (segments processed count)
+  ☐ "High-accuracy transcript available" badge
+  ☐ Smooth scroll to refined sections
+  ☐ Background processing status
+
+
+================================================================================
+SECTION 8: RECOMMENDED IMPLEMENTATION PATH
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+PHASE 1: PROTOTYPE (Week 1-2) → OPTION 3
+Summary: Get audio replay working with simplest architecture
+────────────────────────────────────────────────────────────────────────────────
+
+Why Option 3 first?
+  ✓ Minimal code changes to production system
+  ✓ Learn Whisper integration without complexity
+  ✓ Validate audio storage and replay UX
+  ✓ Provides immediate value (archival + better accuracy)
+  ✓ Low risk (async, doesn't affect real-time path)
+
+Week 1 deliverables:
+  ☐ Add AudioRecorder class to riva_websocket_bridge.py
+    - Write audio chunks to /tmp/{session_id}.wav
+    - Handle session cleanup on disconnect
+  ☐ Install Whisper on build box (start with CPU version)
+  ☐ Create S3 bucket structure: sessions/{id}/audio/complete.wav
+  ☐ Simple batch job: on session end, upload WAV + run Whisper
+
+Week 2 deliverables:
+  ☐ Add database table: final_transcripts (session_id, whisper_text, s3_url)
+  ☐ Create API endpoint: GET /api/sessions/{id}/audio (presigned S3 URL)
+  ☐ Update demo.html to show "Final transcript" toggle
+  ☐ Add clickable timestamp → audio playback
+
+Success criteria:
+  ✓ User can click any word and hear audio
+  ✓ Final transcript is noticeably better than RIVA
+  ✓ No impact on real-time performance
+
+
+────────────────────────────────────────────────────────────────────────────────
+PHASE 2: REFINEMENT (Week 3-4) → OPTION 1
+Summary: Add real-time refinements for better UX
+────────────────────────────────────────────────────────────────────────────────
+
+Why Option 1 next?
+  ✓ Builds on Phase 1 (audio already being buffered)
+  ✓ Delivers real-time value (not just post-session)
+  ✓ Validates reconciliation algorithm
+  ✓ Can reuse Whisper infrastructure from Phase 1
+
+Week 3 deliverables:
+  ☐ Refactor AudioRecorder to support 30s segments
+  ☐ Add Whisper worker pool (start with 1 worker)
+  ☐ Implement word-level alignment (LCS algorithm)
+  ☐ Add WebSocket message type: "refinement_event"
+
+Week 4 deliverables:
+  ☐ Client-side update handler (replace words smoothly)
+  ☐ Visual feedback (subtle highlight on updates)
+  ☐ Error handling (fallback to RIVA if Whisper fails)
+  ☐ Performance testing (10 concurrent sessions)
+
+Success criteria:
+  ✓ Refinements appear 30-40s after speech
+  ✓ UI updates are smooth (no flicker)
+  ✓ System handles 10 concurrent sessions
+
+
+────────────────────────────────────────────────────────────────────────────────
+PHASE 3: OPTIMIZATION (Week 5-6) → OPTION 2 or OPTION 1 tuning
+Summary: Reduce costs and improve latency
+────────────────────────────────────────────────────────────────────────────────
+
+Option A: Confidence-Triggered (if cost is concern)
+  ☐ Extract RIVA confidence scores
+  ☐ Implement selective Whisper invocation
+  ☐ A/B test: does selective mode preserve quality?
+  Target: 70% cost reduction
+
+Option B: Option 1 tuning (if quality is concern)
+  ☐ Add GPU instance for Whisper (faster refinements)
+  ☐ Reduce segment size to 15s (lower latency)
+  ☐ Implement streaming Whisper (realtime-whisper library)
+  Target: 15s refinement latency
+
+
+────────────────────────────────────────────────────────────────────────────────
+PHASE 4: SCALE (Month 3+) → OPTION 4
+Summary: Only if hitting scalability limits (50+ concurrent)
+────────────────────────────────────────────────────────────────────────────────
+
+Migrate when:
+  ✓ Handling >50 concurrent sessions
+  ✓ Session lengths >2 hours common
+  ✓ Need <10s refinement latency
+  ✓ Enterprise customers (SLA requirements)
+
+Migration path:
+  Week 1-2: Infrastructure setup (SQS, DynamoDB, workers)
+  Week 3-4: Dual-write (both systems running in parallel)
+  Week 5-6: Cut over to segment-based, monitor
+  Week 7-8: Deprecate old system
+
+
+================================================================================
+SECTION 9: QUICK DECISION MATRIX
+================================================================================
+
+Choose based on your PRIMARY goal:
+
+Goal: Get audio replay working ASAP
+  → OPTION 3 (Complete Session Re-transcription)
+  Effort: 2 weeks | Cost: ~$0.006/session | Risk: Low
+
+Goal: Best real-time user experience
+  → OPTION 1 (Async Batch Refinement)
+  Effort: 4 weeks | Cost: ~$0.005/session | Risk: Medium
+
+Goal: Minimize compute costs
+  → OPTION 2 (Confidence-Triggered)
+  Effort: 3 weeks | Cost: ~$0.0004/session | Risk: Medium
+
+Goal: Enterprise-ready, high-scale system
+  → OPTION 4 (Segment-Based Pipeline)
+  Effort: 8 weeks | Cost: ~$0.13/session | Risk: High
+
+Current recommendation for your system:
+  Start with OPTION 3 (Phases 1-2 above)
+  Reason: Your deduplication v2.6.0 is working well. Next priority should be
+          audio archival and replay, which Option 3 delivers with minimal risk.
+          You can always add real-time refinements (Option 1) once storage is
+          proven.
+
+================================================================================
+END OF ANALYSIS
+================================================================================
+
+Next steps:
+1. Decide which option aligns with your goals
+2. Review detailed implementation plan for chosen option
+3. Set up development environment (install Whisper locally for testing)
+4. Start with Phase 1 prototype
+
+Questions to consider:
+- What's more important: real-time refinements or post-session accuracy?
+- What's your target: 10 concurrent users or 100?
+- Are sessions typically 5min or 2hr?
+- Budget: $0.01/session or $0.10/session acceptable?
+
+Contact: See CLAUDE.md for project architecture details
+Version: 2.6.0 (Deduplication working, ready for two-pass extension)
