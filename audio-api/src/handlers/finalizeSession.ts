@@ -71,6 +71,7 @@ export async function handler(
         manifest.totalBytes || 0,
         manifest.durationMs || 0
       );
+      console.log('RecordingFinalized event published:', eventId);
     } catch (eventError) {
       console.warn('Failed to publish recording finalized event:', eventError);
       // Don't fail the request if event publishing fails

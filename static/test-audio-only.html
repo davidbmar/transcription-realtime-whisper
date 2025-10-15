@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test: Audio-Only (No WebSocket)</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 50px auto; padding: 20px; }
+        .panel { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+        button { padding: 10px 20px; margin: 5px; font-size: 14px; cursor: pointer; }
+        .log { background: #2d3748; color: #e2e8f0; padding: 15px; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
+        .status { font-size: 24px; font-weight: bold; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>🧪 Audio-Only Test (No WebSocket Interference)</h1>
+    <p>This tests ONLY MediaRecorder → S3, matching the audio-ui pattern EXACTLY.</p>
+
+    <div class="panel">
+        <h3>Step 1: Login</h3>
+        <input type="text" id="username" placeholder="Email" value="dmar@capsule.com" style="padding: 8px; width: 250px;">
+        <input type="password" id="password" placeholder="Password" style="padding: 8px; width: 250px;">
+        <button onclick="app.login()">Login</button>
+        <div id="authStatus" style="margin-top: 10px;">Not authenticated</div>
+    </div>
+
+    <div class="panel">
+        <h3>Step 2: Record Audio</h3>
+        <button id="startBtn" onclick="app.startRecording()" disabled>Start Recording</button>
+        <button id="stopBtn" onclick="app.stopRecording()" disabled>Stop Recording</button>
+        <div class="status" id="recordingTime">00:00</div>
+        <div id="chunkInfo">Chunks uploaded: <span id="chunkCount">0</span></div>
+    </div>
+
+    <div class="panel">
+        <h3>Step 3: Download & Test Chunks from S3</h3>
+        <p>After recording, download the chunks using AWS CLI and test with ffplay or browser:</p>
+        <pre style="background: #fff; padding: 10px; font-size: 11px;">
+# List your session
+aws s3 ls s3://dbm-test-1100-13-2025/users/{USER_ID}/audio/sessions/ --recursive
+
+# Download chunks
+aws s3 cp s3://dbm-test-1100-13-2025/users/{USER_ID}/audio/sessions/{SESSION}/chunks/00001-*.webm ./chunk1.webm
+aws s3 cp s3://dbm-test-1100-13-2025/users/{USER_ID}/audio/sessions/{SESSION}/chunks/00002-*.webm ./chunk2.webm
+aws s3 cp s3://dbm-test-1100-13-2025/users/{USER_ID}/audio/sessions/{SESSION}/chunks/00003-*.webm ./chunk3.webm
+
+# Test playback - ALL should play!
+ffplay chunk1.webm
+ffplay chunk2.webm  # ← Should work if pattern is correct
+ffplay chunk3.webm  # ← Should work if pattern is correct
+        </pre>
+    </div>
+
+    <div class="log" id="logPanel"></div>
+
+    <script>
+        const CONFIG = {
+            apiUrl: 'https://1avw7l3k1b.execute-api.us-east-2.amazonaws.com',
+            cognitoRegion: 'us-east-2',
+            cognitoClientId: '5rf86mbjntnhesmd9lb04g6kmp',
+            chunkDuration: 5  // 5 seconds
+        };
+
+        class AudioOnlyTest {
+            constructor() {
+                this.idToken = null;
+                this.userId = null;
+                this.sessionId = null;
+                this.mediaStream = null;
+                this.mediaRecorder = null;
+                this.isRecording = false;
+                this.currentTime = 0;
+                this.chunkSequence = 0;
+                this.chunkCount = 0;
+                this.timerInterval = null;
+            }
+
+            log(msg) {
+                const timestamp = new Date().toLocaleTimeString();
+                const panel = document.getElementById('logPanel');
+                panel.innerHTML += `[${timestamp}] ${msg}\n`;
+                panel.scrollTop = panel.scrollHeight;
+                console.log(msg);
+            }
+
+            async login() {
+                const username = document.getElementById('username').value;
+                const password = document.getElementById('password').value;
+
+                try {
+                    this.log('Authenticating...');
+                    const response = await fetch(`https://cognito-idp.${CONFIG.cognitoRegion}.amazonaws.com/`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-amz-json-1.1',
+                            'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth'
+                        },
+                        body: JSON.stringify({
+                            AuthFlow: 'USER_PASSWORD_AUTH',
+                            ClientId: CONFIG.cognitoClientId,
+                            AuthParameters: { USERNAME: username, PASSWORD: password }
+                        })
+                    });
+
+                    const data = await response.json();
+                    if (data.AuthenticationResult && data.AuthenticationResult.IdToken) {
+                        this.idToken = data.AuthenticationResult.IdToken;
+                        const payload = JSON.parse(atob(this.idToken.split('.')[1]));
+                        this.userId = payload.sub;
+                        document.getElementById('authStatus').textContent = `✓ Authenticated: ${payload.email}`;
+                        document.getElementById('startBtn').disabled = false;
+                        this.log(`✓ Authenticated: ${payload.email}`);
+                    } else {
+                        throw new Error(data.message || 'Authentication failed');
+                    }
+                } catch (error) {
+                    this.log(`ERROR: ${error.message}`);
+                    alert('Authentication failed: ' + error.message);
+                }
+            }
+
+            async startRecording() {
+                try {
+                    this.log('=== STARTING RECORDING (EXACT AUDIO-UI PATTERN) ===');
+
+                    // Create session
+                    await this.createSession();
+
+                    // Get microphone access (EXACT audio-ui constraints)
+                    this.log('Requesting microphone access...');
+                    this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }
+                    });
+                    this.log('✓ Microphone access granted');
+
+                    // Start first MediaRecorder
+                    await this.startNewChunkRecording();
+
+                    // Start 1-second interval timer (EXACT audio-ui pattern)
+                    this.isRecording = true;
+                    this.currentTime = 0;
+                    this.chunkSequence = 0;
+                    this.startTimer();
+
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    this.log('✓ Recording started with 1-second interval timer');
+
+                } catch (error) {
+                    this.log(`ERROR: ${error.message}`);
+                    alert('Failed to start: ' + error.message);
+                }
+            }
+
+            startTimer() {
+                this.timerInterval = setInterval(() => {
+                    this.currentTime++;
+                    const mins = Math.floor(this.currentTime / 60);
+                    const secs = this.currentTime % 60;
+                    document.getElementById('recordingTime').textContent =
+                        `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
+                    // EXACT audio-ui line: if (newTime > 0 && newTime % chunkDuration === 0)
+                    if (this.currentTime > 0 && this.currentTime % CONFIG.chunkDuration === 0) {
+                        this.log(`>>> Chunk ${this.chunkSequence + 1} completed at ${this.currentTime}s`);
+                        this.createChunkFromCurrentRecording();
+                    }
+                }, 1000);
+            }
+
+            stopTimer() {
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                    this.timerInterval = null;
+                }
+            }
+
+            async createSession() {
+                this.log('Creating S3 session...');
+                const response = await fetch(`${CONFIG.apiUrl}/api/audio/sessions`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${this.idToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ codec: 'webm', sampleRate: 48000 })
+                });
+
+                if (!response.ok) throw new Error(`Session creation failed: ${response.status}`);
+                const data = await response.json();
+                this.sessionId = data.sessionId;
+                this.log(`✓ Session created: ${this.sessionId}`);
+                this.log(`✓ S3 path: users/${this.userId}/audio/sessions/${this.sessionId}/chunks/`);
+            }
+
+            async startNewChunkRecording() {
+                try {
+                    // EXACT audio-ui pattern: Find supported MIME type
+                    const mimeTypes = [
+                        'audio/webm;codecs=opus',
+                        'audio/webm',
+                        'audio/mp4',
+                        'audio/ogg;codecs=opus',
+                        'audio/wav'
+                    ];
+
+                    let selectedMimeType = '';
+                    for (const mimeType of mimeTypes) {
+                        if (MediaRecorder.isTypeSupported(mimeType)) {
+                            selectedMimeType = mimeType;
+                            break;
+                        }
+                    }
+
+                    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+                    this.mediaRecorder = new MediaRecorder(this.mediaStream, options);
+
+                    this.mediaRecorder.onerror = (event) => {
+                        this.log(`MediaRecorder error: ${event.error}`);
+                    };
+
+                    // EXACT audio-ui pattern: start() with NO parameters
+                    this.mediaRecorder.start();
+                    this.log(`New chunk recording started (${selectedMimeType})`);
+
+                } catch (error) {
+                    this.log(`ERROR starting chunk: ${error.message}`);
+                }
+            }
+
+            async createChunkFromCurrentRecording() {
+                if (!this.mediaRecorder || this.mediaRecorder.state !== 'recording') {
+                    this.log("ERROR: Cannot create chunk - MediaRecorder not recording");
+                    return;
+                }
+
+                try {
+                    const chunks = [];
+                    const oldRecorder = this.mediaRecorder;  // Save reference
+
+                    // EXACT audio-ui pattern: Promise to collect data
+                    const chunkPromise = new Promise((resolve) => {
+                        oldRecorder.ondataavailable = (event) => {
+                            if (event.data.size > 0) {
+                                chunks.push(event.data);
+                                this.log(`  ondataavailable: ${event.data.size} bytes`);
+                            }
+                        };
+
+                        oldRecorder.onstop = () => {
+                            if (chunks.length > 0) {
+                                const audioBlob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
+                                resolve(audioBlob);
+                            } else {
+                                resolve(null);
+                            }
+                        };
+                    });
+
+                    // EXACT audio-ui pattern: Stop recorder
+                    this.log(`  Stopping old MediaRecorder...`);
+                    oldRecorder.stop();
+                    const audioBlob = await chunkPromise;
+
+                    if (audioBlob) {
+                        this.log(`✓ Chunk ${this.chunkSequence + 1} captured (${audioBlob.size} bytes)`);
+
+                        // Upload to S3
+                        const chunkStartTime = this.chunkSequence * CONFIG.chunkDuration * 1000;
+                        const chunkEndTime = (this.chunkSequence + 1) * CONFIG.chunkDuration * 1000;
+                        await this.uploadChunk(audioBlob, this.chunkSequence, chunkStartTime, chunkEndTime);
+                        this.chunkSequence++;
+                    }
+
+                    // EXACT audio-ui pattern: Start new recorder if still recording
+                    if (this.mediaStream && this.isRecording) {
+                        this.log(`  Starting new MediaRecorder...`);
+                        await this.startNewChunkRecording();
+                    }
+
+                } catch (error) {
+                    this.log(`ERROR creating chunk: ${error.message}`);
+                }
+            }
+
+            async uploadChunk(blob, seq, tStartMs, tEndMs) {
+                try {
+                    this.log(`  Requesting presigned URL for chunk ${seq + 1}...`);
+
+                    // Step 1: Get presigned URL
+                    const presignResp = await fetch(
+                        `${CONFIG.apiUrl}/api/audio/sessions/${this.sessionId}/chunks/presign`,
+                        {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${this.idToken}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                seq: seq + 1,
+                                tStartMs: Math.floor(tStartMs),
+                                tEndMs: Math.floor(tEndMs),
+                                ext: 'webm',
+                                sizeBytes: blob.size,
+                                contentType: 'audio/webm'
+                            })
+                        }
+                    );
+
+                    if (!presignResp.ok) {
+                        throw new Error(`Presign failed: ${presignResp.status}`);
+                    }
+
+                    const presignData = await presignResp.json();
+                    this.log(`  ✓ Presigned URL received`);
+
+                    // Step 2: Upload to S3
+                    this.log(`  Uploading to S3...`);
+                    const uploadResp = await fetch(presignData.putUrl, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'audio/webm',
+                            'x-amz-server-side-encryption': 'AES256'
+                        },
+                        body: blob
+                    });
+
+                    if (!uploadResp.ok) {
+                        throw new Error(`S3 upload failed: ${uploadResp.status}`);
+                    }
+                    this.log(`  ✓ Uploaded to S3`);
+
+                    // Step 3: Complete chunk
+                    await fetch(
+                        `${CONFIG.apiUrl}/api/audio/sessions/${this.sessionId}/chunks/complete`,
+                        {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${this.idToken}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                objectKey: presignData.objectKey,
+                                seq: seq + 1,
+                                tStartMs: Math.floor(tStartMs),
+                                tEndMs: Math.floor(tEndMs),
+                                bytes: blob.size
+                            })
+                        }
+                    );
+
+                    this.chunkCount++;
+                    document.getElementById('chunkCount').textContent = this.chunkCount;
+                    this.log(`✓✓✓ Chunk ${seq + 1} COMPLETE (${blob.size} bytes) - Should be PLAYABLE!`);
+
+                } catch (error) {
+                    this.log(`ERROR uploading chunk: ${error.message}`);
+                }
+            }
+
+            async stopRecording() {
+                try {
+                    this.log('=== STOPPING RECORDING ===');
+                    this.isRecording = false;
+
+                    // Stop timer
+                    this.stopTimer();
+
+                    // Capture final chunk
+                    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+                        this.log('Creating final chunk...');
+                        await this.createChunkFromCurrentRecording();
+                    }
+
+                    // Stop microphone
+                    if (this.mediaStream) {
+                        this.mediaStream.getTracks().forEach(track => track.stop());
+                        this.log('✓ Microphone stopped');
+                    }
+
+                    // Finalize session
+                    if (this.sessionId) {
+                        await this.finalizeSession();
+                    }
+
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('stopBtn').disabled = true;
+                    this.log('✓✓✓ RECORDING COMPLETE - All chunks should be playable!');
+
+                } catch (error) {
+                    this.log(`ERROR stopping: ${error.message}`);
+                }
+            }
+
+            async finalizeSession() {
+                this.log('Finalizing session...');
+                const response = await fetch(
+                    `${CONFIG.apiUrl}/api/audio/sessions/${this.sessionId}/finalize`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${this.idToken}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            final: true,
+                            durationMs: this.currentTime * 1000
+                        })
+                    }
+                );
+
+                const data = await response.json();
+                this.log(`✓ Session finalized: ${data.chunkCount} chunks, ${data.totalBytes} bytes`);
+                this.log(`✓ Session ID: ${this.sessionId}`);
+                this.log(`✓ User ID: ${this.userId}`);
+            }
+        }
+
+        const app = new AudioOnlyTest();
+    </script>
+</body>
+</html>

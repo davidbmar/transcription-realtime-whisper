@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hybrid Dual-Path Transcription (V4 - Split Audio Stream)</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 30px;
+        }
+
+        .auth-panel {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+
+        .auth-panel.authenticated {
+            background-color: #d4edda;
+            border-color: #28a745;
+        }
+
+        .auth-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .status-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .status-card {
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #6c757d;
+        }
+
+        .status-card.active {
+            border-left-color: #28a745;
+        }
+
+        .status-card h4 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .status-card .value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+
+        .btn-success {
+            background-color: #28a745;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background-color: #1e7e34;
+        }
+
+        .btn-danger {
+            background-color: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background-color: #c82333;
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background-color: #545b62;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        input[type="text"], input[type="password"] {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            font-size: 14px;
+            min-width: 200px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .transcription-panel {
+            min-height: 200px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            background-color: #fafafa;
+            margin-bottom: 20px;
+        }
+
+        .log-panel {
+            max-height: 150px;
+            overflow-y: auto;
+            background-color: #2d3748;
+            color: #e2e8f0;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+        }
+
+        .log-entry {
+            margin-bottom: 3px;
+        }
+
+        .log-timestamp {
+            color: #90cdf4;
+        }
+
+        .log-info { color: #68d391; }
+        .log-warn { color: #fbb74e; }
+        .log-error { color: #f56565; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Hybrid Dual-Path Transcription (V4)</h1>
+        <div class="subtitle">
+            FIXED: Single microphone stream split with AudioContext
+        </div>
+
+        <!-- Authentication Panel -->
+        <div id="authPanel" class="auth-panel">
+            <h3>Step 1: Authenticate with Cognito</h3>
+            <div class="auth-row">
+                <input type="text" id="username" placeholder="Email" value="dmar@capsule.com">
+                <input type="password" id="password" placeholder="Password">
+                <button class="btn-primary" id="loginBtn">Login</button>
+                <span id="authStatus">Not authenticated</span>
+            </div>
+        </div>
+
+        <!-- Status Dashboard -->
+        <div class="status-bar">
+            <div class="status-card" id="wsStatusCard">
+                <h4>WebSocket (Riva)</h4>
+                <div class="value" id="wsStatus">Disconnected</div>
+            </div>
+            <div class="status-card" id="s3StatusCard">
+                <h4>S3 Upload</h4>
+                <div class="value" id="s3Status">Idle</div>
+            </div>
+            <div class="status-card" id="sessionCard">
+                <h4>Session</h4>
+                <div class="value" id="sessionStatus">None</div>
+            </div>
+            <div class="status-card" id="chunksCard">
+                <h4>Chunks Uploaded</h4>
+                <div class="value" id="chunkCount">0</div>
+            </div>
+            <div class="status-card">
+                <h4>Recording Time</h4>
+                <div class="value" id="recordingTime">00:00</div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+            <button id="startBtn" class="btn-success" disabled>Start Recording</button>
+            <button id="stopBtn" class="btn-danger" disabled>Stop Recording</button>
+            <button id="clearBtn" class="btn-secondary">Clear Transcripts</button>
+        </div>
+
+        <!-- Transcription Results -->
+        <div class="transcription-panel">
+            <h3>Live Transcription (Riva Real-time)</h3>
+            <div id="transcriptionDisplay" style="padding: 10px; line-height: 1.8; font-size: 16px;">
+                <p style="color: #666; text-align: center;">Authenticate and click "Start Recording" to begin...</p>
+            </div>
+        </div>
+
+        <!-- Debug Log -->
+        <div class="log-panel" id="logPanel">
+            <!-- Logs will be populated dynamically -->
+        </div>
+    </div>
+
+    <script src="riva-websocket-client.js"></script>
+    <script>
+        // Configuration
+        const CONFIG = {
+            apiUrl: 'https://1avw7l3k1b.execute-api.us-east-2.amazonaws.com',
+            wsUrl: `wss://${window.location.hostname}:8443/`,
+            cognitoRegion: 'us-east-2',
+            cognitoClientId: '5rf86mbjntnhesmd9lb04g6kmp',
+            chunkDuration: 5  // 5 seconds per chunk
+        };
+
+        class HybridTranscriptionApp {
+            constructor() {
+                this.idToken = null;
+                this.userId = null;
+                this.sessionId = null;
+                this.wsClient = null;
+
+                // Single microphone stream
+                this.mediaStream = null;
+
+                // Split streams via AudioContext
+                this.audioContext = null;
+                this.mediaStreamDestination = null;
+                this.recorderStream = null;
+
+                this.mediaRecorder = null;
+                this.chunkSequence = 0;
+                this.chunkCount = 0;
+                this.isRecording = false;
+
+                // EXACT AUDIO-UI PATTERN: Use 1-second interval timer
+                this.currentTime = 0;
+                this.timerInterval = null;
+
+                // Transcription state
+                this.finalTranscript = '';
+                this.currentPartial = '';
+
+                this.initializeUI();
+            }
+
+            initializeUI() {
+                this.elements = {
+                    loginBtn: document.getElementById('loginBtn'),
+                    username: document.getElementById('username'),
+                    password: document.getElementById('password'),
+                    authStatus: document.getElementById('authStatus'),
+                    authPanel: document.getElementById('authPanel'),
+                    startBtn: document.getElementById('startBtn'),
+                    stopBtn: document.getElementById('stopBtn'),
+                    clearBtn: document.getElementById('clearBtn'),
+                    wsStatus: document.getElementById('wsStatus'),
+                    s3Status: document.getElementById('s3Status'),
+                    sessionStatus: document.getElementById('sessionStatus'),
+                    chunkCount: document.getElementById('chunkCount'),
+                    recordingTime: document.getElementById('recordingTime'),
+                    wsStatusCard: document.getElementById('wsStatusCard'),
+                    s3StatusCard: document.getElementById('s3StatusCard'),
+                    transcriptionDisplay: document.getElementById('transcriptionDisplay'),
+                    logPanel: document.getElementById('logPanel')
+                };
+
+                this.elements.loginBtn.addEventListener('click', () => this.login());
+                this.elements.startBtn.addEventListener('click', () => this.startRecording());
+                this.elements.stopBtn.addEventListener('click', () => this.stopRecording());
+                this.elements.clearBtn.addEventListener('click', () => this.clearTranscripts());
+
+                this.log('Application initialized (V4 - Split Stream Fix)');
+            }
+
+            formatTime(seconds) {
+                const mins = Math.floor(seconds / 60);
+                const secs = seconds % 60;
+                return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+            }
+
+            async login() {
+                const username = this.elements.username.value;
+                const password = this.elements.password.value;
+
+                if (!username || !password) {
+                    alert('Please enter username and password');
+                    return;
+                }
+
+                try {
+                    this.log('Authenticating with Cognito...');
+
+                    const response = await fetch(`https://cognito-idp.${CONFIG.cognitoRegion}.amazonaws.com/`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-amz-json-1.1',
+                            'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth'
+                        },
+                        body: JSON.stringify({
+                            AuthFlow: 'USER_PASSWORD_AUTH',
+                            ClientId: CONFIG.cognitoClientId,
+                            AuthParameters: {
+                                USERNAME: username,
+                                PASSWORD: password
+                            }
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.AuthenticationResult && data.AuthenticationResult.IdToken) {
+                        this.idToken = data.AuthenticationResult.IdToken;
+                        const payload = JSON.parse(atob(this.idToken.split('.')[1]));
+                        this.userId = payload.sub;
+
+                        this.elements.authStatus.textContent = `Authenticated as ${payload.email}`;
+                        this.elements.authPanel.classList.add('authenticated');
+                        this.elements.loginBtn.disabled = true;
+                        this.elements.startBtn.disabled = false;
+
+                        this.log(`Authenticated: ${payload.email}`);
+                    } else {
+                        throw new Error(data.message || 'Authentication failed');
+                    }
+                } catch (error) {
+                    this.log(`Authentication error: ${error.message}`, 'error');
+                    alert('Authentication failed: ' + error.message);
+                }
+            }
+
+            async startRecording() {
+                try {
+                    this.log('Starting dual-path recording...');
+
+                    await this.createSession();
+                    await this.connectWebSocket();
+                    await this.startAudioCapture();
+
+                    this.isRecording = true;
+                    this.currentTime = 0;
+                    this.chunkSequence = 0;
+                    this.elements.startBtn.disabled = true;
+                    this.elements.stopBtn.disabled = false;
+                    this.elements.wsStatusCard.classList.add('active');
+                    this.elements.s3StatusCard.classList.add('active');
+
+                    // EXACT AUDIO-UI PATTERN: Start 1-second interval timer
+                    this.startTimer();
+
+                    this.log('Recording started - split stream architecture');
+                } catch (error) {
+                    this.log(`Failed to start recording: ${error.message}`, 'error');
+                    alert('Failed to start recording: ' + error.message);
+                }
+            }
+
+            // EXACT AUDIO-UI PATTERN: 1-second interval timer
+            startTimer() {
+                this.timerInterval = setInterval(() => {
+                    this.currentTime++;
+                    this.elements.recordingTime.textContent = this.formatTime(this.currentTime);
+
+                    // Check if we need to create a new chunk
+                    if (this.currentTime > 0 && this.currentTime % CONFIG.chunkDuration === 0) {
+                        this.log(`Chunk ${this.chunkSequence + 1} completed at ${this.currentTime}s`);
+                        this.createChunkFromCurrentRecording();
+                    }
+                }, 1000);
+            }
+
+            stopTimer() {
+                if (this.timerInterval) {
+                    clearInterval(this.timerInterval);
+                    this.timerInterval = null;
+                }
+            }
+
+            async createSession() {
+                this.log('Creating S3 session...');
+
+                const response = await fetch(`${CONFIG.apiUrl}/api/audio/sessions`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${this.idToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        codec: 'webm',
+                        sampleRate: 48000
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Session creation failed: ${response.status}`);
+                }
+
+                const data = await response.json();
+                this.sessionId = data.sessionId;
+                this.elements.sessionStatus.textContent = this.sessionId.substring(8, 20) + '...';
+                this.elements.s3Status.textContent = 'Ready';
+
+                this.log(`Session created: ${this.sessionId}`);
+            }
+
+            async connectWebSocket() {
+                this.log('Connecting to Riva WebSocket...');
+
+                this.wsClient = new RivaWebSocketClient({
+                    serverUrl: CONFIG.wsUrl,
+                    enablePartials: true,
+                    frameMs: 100
+                });
+
+                this.wsClient.on('connection', (data) => {
+                    this.elements.wsStatus.textContent = 'Connected';
+                    this.log('WebSocket connected');
+                });
+
+                this.wsClient.on('display', (data) => {
+                    this.finalTranscript = data.stable_text || '';
+                    this.currentPartial = data.partial_suffix || '';
+                    this.updateTranscriptionDisplay();
+                });
+
+                this.wsClient.on('transcription', (data) => {
+                    if (data.text && data.text.trim()) {
+                        this.finalTranscript += data.text + ' ';
+                    }
+                    this.currentPartial = '';
+                    this.updateTranscriptionDisplay();
+                });
+
+                this.wsClient.on('error', (data) => {
+                    this.log(`WebSocket error: ${data.error}`, 'error');
+                });
+
+                this.wsClient.on('disconnect', (data) => {
+                    this.elements.wsStatus.textContent = 'Disconnected';
+                    this.log('WebSocket disconnected');
+                });
+
+                await this.wsClient.connect();
+            }
+
+            async startAudioCapture() {
+                this.log('Requesting microphone access (single stream)...');
+
+                // Get SINGLE microphone stream
+                this.mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        channelCount: 1,
+                        sampleRate: 48000,
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+                this.log('✓ Microphone access granted - creating split streams');
+
+                // Create AudioContext to split the stream
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+                const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+
+                // Create destination for MediaRecorder
+                this.mediaStreamDestination = this.audioContext.createMediaStreamDestination();
+                source.connect(this.mediaStreamDestination);
+
+                this.recorderStream = this.mediaStreamDestination.stream;
+                this.log('✓ Split streams created via AudioContext');
+
+                // Start WebSocket transcription (uses original stream)
+                // RivaWebSocketClient will create its own AudioContext
+                await this.wsClient.startTranscription();
+                this.elements.wsStatus.textContent = 'Transcribing';
+
+                // Start first MediaRecorder with split stream
+                await this.startNewChunkRecording();
+            }
+
+            async startNewChunkRecording() {
+                try {
+                    // EXACT AUDIO-UI PATTERN: Find supported MIME type
+                    const mimeTypes = [
+                        'audio/webm;codecs=opus',
+                        'audio/webm',
+                        'audio/mp4',
+                        'audio/ogg;codecs=opus',
+                        'audio/wav'
+                    ];
+
+                    let selectedMimeType = '';
+                    for (const mimeType of mimeTypes) {
+                        if (MediaRecorder.isTypeSupported(mimeType)) {
+                            selectedMimeType = mimeType;
+                            break;
+                        }
+                    }
+
+                    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+
+                    // Use the SPLIT stream from AudioContext, NOT the original
+                    this.mediaRecorder = new MediaRecorder(this.recorderStream, options);
+
+                    this.mediaRecorder.onerror = (event) => {
+                        this.log(`MediaRecorder error: ${event.error}`, 'error');
+                    };
+
+                    // EXACT AUDIO-UI PATTERN: start() with NO parameters
+                    this.mediaRecorder.start();
+                    this.log(`New chunk recording started (${selectedMimeType})`);
+
+                } catch (error) {
+                    this.log(`ERROR starting chunk: ${error.message}`, 'error');
+                }
+            }
+
+            // EXACT AUDIO-UI PATTERN: createChunkFromCurrentRecording
+            async createChunkFromCurrentRecording() {
+                if (!this.mediaRecorder || this.mediaRecorder.state !== 'recording') {
+                    this.log("ERROR: Cannot create chunk - MediaRecorder not recording", 'error');
+                    return;
+                }
+
+                try {
+                    const chunks = [];
+                    const oldRecorder = this.mediaRecorder;
+
+                    // EXACT AUDIO-UI PATTERN: Promise to collect data
+                    const chunkPromise = new Promise((resolve) => {
+                        oldRecorder.ondataavailable = (event) => {
+                            if (event.data.size > 0) {
+                                chunks.push(event.data);
+                            }
+                        };
+
+                        oldRecorder.onstop = () => {
+                            if (chunks.length > 0) {
+                                const audioBlob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
+                                resolve(audioBlob);
+                            } else {
+                                resolve(null);
+                            }
+                        };
+                    });
+
+                    // EXACT AUDIO-UI PATTERN: Stop recorder
+                    oldRecorder.stop();
+                    const audioBlob = await chunkPromise;
+
+                    if (audioBlob) {
+                        this.log(`Chunk ${this.chunkSequence + 1} captured (${audioBlob.size} bytes)`);
+
+                        // Calculate timestamps
+                        const chunkStartTime = this.chunkSequence * CONFIG.chunkDuration * 1000;
+                        const chunkEndTime = (this.chunkSequence + 1) * CONFIG.chunkDuration * 1000;
+
+                        // Upload chunk in background
+                        this.uploadChunk(audioBlob, this.chunkSequence, chunkStartTime, chunkEndTime);
+                        this.chunkSequence++;
+                    }
+
+                    // EXACT AUDIO-UI PATTERN: Start new recorder if still recording
+                    if (this.recorderStream && this.isRecording) {
+                        await this.startNewChunkRecording();
+                    }
+
+                } catch (error) {
+                    this.log(`ERROR creating chunk: ${error.message}`, 'error');
+                }
+            }
+
+            async uploadChunk(blob, seq, tStartMs, tEndMs) {
+                try {
+                    this.elements.s3Status.textContent = `Uploading ${seq + 1}...`;
+
+                    // Step 1: Get presigned URL
+                    const presignResp = await fetch(
+                        `${CONFIG.apiUrl}/api/audio/sessions/${this.sessionId}/chunks/presign`,
+                        {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${this.idToken}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                seq: seq + 1,
+                                tStartMs: Math.floor(tStartMs),
+                                tEndMs: Math.floor(tEndMs),
+                                ext: 'webm',
+                                sizeBytes: blob.size,
+                                contentType: 'audio/webm'
+                            })
+                        }
+                    );
+
+                    const presignData = await presignResp.json();
+
+                    // Step 2: Upload to S3
+                    const uploadResp = await fetch(presignData.putUrl, {
+                        method: 'PUT',
+                        headers: {
+                            'Content-Type': 'audio/webm',
+                            'x-amz-server-side-encryption': 'AES256'
+                        },
+                        body: blob
+                    });
+
+                    if (!uploadResp.ok) {
+                        throw new Error(`S3 upload failed: ${uploadResp.status}`);
+                    }
+
+                    // Step 3: Complete chunk
+                    await fetch(
+                        `${CONFIG.apiUrl}/api/audio/sessions/${this.sessionId}/chunks/complete`,
+                        {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${this.idToken}`,
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({
+                                objectKey: presignData.objectKey,
+                                seq: seq + 1,
+                                tStartMs: Math.floor(tStartMs),
+                                tEndMs: Math.floor(tEndMs),
+                                bytes: blob.size
+                            })
+                        }
+                    );
+
+                    this.chunkCount++;
+                    this.elements.chunkCount.textContent = this.chunkCount;
+                    this.elements.s3Status.textContent = `Uploaded ${this.chunkCount}`;
+
+                    this.log(`✓ Chunk ${seq + 1} uploaded (${blob.size} bytes) - PLAYABLE!`);
+                } catch (error) {
+                    this.log(`Chunk upload error: ${error.message}`, 'error');
+                }
+            }
+
+            async stopRecording() {
+                try {
+                    this.log('Stopping recording...');
+                    this.isRecording = false;
+
+                    // Stop timer
+                    this.stopTimer();
+
+                    // Capture final chunk
+                    if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
+                        await this.createChunkFromCurrentRecording();
+                    }
+
+                    // Stop WebSocket
+                    if (this.wsClient) {
+                        await this.wsClient.stopTranscription();
+                        await this.wsClient.disconnect();
+                    }
+
+                    // Stop microphone
+                    if (this.mediaStream) {
+                        this.mediaStream.getTracks().forEach(track => track.stop());
+                    }
+
+                    // Clean up AudioContext
+                    if (this.audioContext) {
+                        await this.audioContext.close();
+                    }
+
+                    // Finalize session
+                    if (this.sessionId) {
+                        await this.finalizeSession();
+                    }
+
+                    this.elements.startBtn.disabled = false;
+                    this.elements.stopBtn.disabled = true;
+                    this.elements.wsStatusCard.classList.remove('active');
+                    this.elements.s3StatusCard.classList.remove('active');
+                    this.elements.wsStatus.textContent = 'Disconnected';
+                    this.elements.s3Status.textContent = 'Finalized';
+
+                    this.log('Recording stopped - all chunks playable!');
+                } catch (error) {
+                    this.log(`Error stopping recording: ${error.message}`, 'error');
+                }
+            }
+
+            async finalizeSession() {
+                this.log('Finalizing session...');
+
+                const response = await fetch(
+                    `${CONFIG.apiUrl}/api/audio/sessions/${this.sessionId}/finalize`,
+                    {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${this.idToken}`,
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            final: true,
+                            durationMs: this.currentTime * 1000
+                        })
+                    }
+                );
+
+                const data = await response.json();
+                this.log(`✓ Session finalized: ${data.chunkCount} chunks, ${data.totalBytes} bytes`);
+            }
+
+            updateTranscriptionDisplay() {
+                const display = this.elements.transcriptionDisplay;
+
+                let html = '<div style="padding: 10px;">';
+
+                if (this.finalTranscript) {
+                    html += `<span style="color: #000; font-weight: 500;">${this.escapeHtml(this.finalTranscript)}</span>`;
+                }
+
+                if (this.currentPartial) {
+                    html += `<span style="color: #888; font-style: italic; background-color: #f0f0f0; padding: 2px 6px; border-radius: 3px;">${this.escapeHtml(this.currentPartial)}</span>`;
+                }
+
+                html += '</div>';
+
+                display.innerHTML = html;
+            }
+
+            clearTranscripts() {
+                this.finalTranscript = '';
+                this.currentPartial = '';
+                this.elements.transcriptionDisplay.innerHTML = '<p style="color: #666; text-align: center;">Transcripts cleared</p>';
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            log(message, level = 'info') {
+                const logPanel = this.elements.logPanel;
+                const timestamp = new Date().toLocaleTimeString();
+
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry';
+                logEntry.innerHTML = `
+                    <span class="log-timestamp">[${timestamp}]</span>
+                    <span class="log-${level}">[${level.toUpperCase()}]</span>
+                    ${message}
+                `;
+
+                logPanel.appendChild(logEntry);
+                logPanel.scrollTop = logPanel.scrollHeight;
+
+                while (logPanel.children.length > 50) {
+                    logPanel.removeChild(logPanel.firstChild);
+                }
+
+                console.log(`[${timestamp}] [${level.toUpperCase()}] ${message}`);
+            }
+        }
+
+        // Initialize application
+        document.addEventListener('DOMContentLoaded', () => {
+            new HybridTranscriptionApp();
+        });
+    </script>
+</body>
+</html>
