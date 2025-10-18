@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhisperLive Streaming ASR</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 14px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 30px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #startBtn {
+            background: #10b981;
+            color: white;
+        }
+
+        #startBtn:hover:not(:disabled) {
+            background: #059669;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+        }
+
+        #stopBtn {
+            background: #ef4444;
+            color: white;
+        }
+
+        #stopBtn:hover:not(:disabled) {
+            background: #dc2626;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+        }
+
+        .status {
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .status.disconnected {
+            background: #fee;
+            color: #c00;
+            border: 1px solid #fcc;
+        }
+
+        .status.connecting {
+            background: #fef3c7;
+            color: #92400e;
+            border: 1px solid #fde68a;
+        }
+
+        .status.connected {
+            background: #d1fae5;
+            color: #065f46;
+            border: 1px solid #6ee7b7;
+        }
+
+        .status.recording {
+            background: #dbeafe;
+            color: #1e40af;
+            border: 1px solid #93c5fd;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.8; }
+        }
+
+        .transcript-box {
+            background: #f9fafb;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            min-height: 200px;
+            max-height: 400px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+        }
+
+        .transcript-entry {
+            margin-bottom: 16px;
+            padding: 12px;
+            background: white;
+            border-radius: 6px;
+            border-left: 4px solid #667eea;
+        }
+
+        .transcript-entry.partial {
+            border-left-color: #94a3b8;
+            opacity: 0.7;
+            font-style: italic;
+        }
+
+        .transcript-entry.final {
+            border-left-color: #10b981;
+        }
+
+        .transcript-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: #666;
+            margin-bottom: 6px;
+            letter-spacing: 0.5px;
+        }
+
+        .transcript-text {
+            color: #1f2937;
+            line-height: 1.6;
+            font-size: 15px;
+        }
+
+        .settings {
+            background: #f3f4f6;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .setting-group {
+            margin-bottom: 15px;
+        }
+
+        .setting-group:last-child {
+            margin-bottom: 0;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 600;
+            font-size: 13px;
+            color: #374151;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .footer {
+            text-align: center;
+            color: #9ca3af;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+
+        .indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .indicator.green {
+            background: #10b981;
+            box-shadow: 0 0 8px #10b981;
+        }
+
+        .indicator.red {
+            background: #ef4444;
+        }
+
+        .indicator.yellow {
+            background: #f59e0b;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WhisperLive Streaming ASR</h1>
+        <p class="subtitle">Real-time speech recognition powered by WhisperLive</p>
+
+        <div class="settings">
+            <div class="setting-group">
+                <label for="modelSelect">Whisper Model</label>
+                <select id="modelSelect">
+                    <option value="Systran/faster-whisper-small.en">Small (English only - Fast)</option>
+                    <option value="Systran/faster-whisper-medium.en">Medium (English only)</option>
+                    <option value="Systran/faster-whisper-large-v2">Large v2 (Multilingual)</option>
+                    <option value="Systran/faster-whisper-large-v3">Large v3 (Multilingual - Best)</option>
+                </select>
+            </div>
+            <div class="setting-group">
+                <label for="languageInput">Language Code (e.g., en, es, fr)</label>
+                <input type="text" id="languageInput" value="en" placeholder="en">
+            </div>
+        </div>
+
+        <div id="status" class="status disconnected">
+            <span class="indicator red"></span>
+            <span id="statusText">Disconnected</span>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"/>
+                    <path d="M12 6v12"/>
+                </svg>
+                Start Recording
+            </button>
+            <button id="stopBtn" disabled>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="6" y="6" width="12" height="12" rx="2"/>
+                </svg>
+                Stop Recording
+            </button>
+        </div>
+
+        <div class="transcript-box" id="transcriptBox">
+            <div style="color: #9ca3af; text-align: center; padding: 40px 20px;">
+                Click "Start Recording" to begin transcription
+            </div>
+        </div>
+
+        <div class="footer">
+            Powered by WhisperLive &bull; Secure WSS connection
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let isRecording = false;
+
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('status');
+        const statusText = document.getElementById('statusText');
+        const transcriptBox = document.getElementById('transcriptBox');
+        const modelSelect = document.getElementById('modelSelect');
+        const languageInput = document.getElementById('languageInput');
+
+        function setStatus(state, message) {
+            statusDiv.className = `status ${state}`;
+            const indicator = statusDiv.querySelector('.indicator');
+            indicator.className = 'indicator';
+
+            if (state === 'connected' || state === 'recording') {
+                indicator.classList.add('green');
+            } else if (state === 'connecting') {
+                indicator.classList.add('yellow');
+            } else {
+                indicator.classList.add('red');
+            }
+
+            statusText.textContent = message;
+        }
+
+        function addTranscript(text, isFinal = false) {
+            const entry = document.createElement('div');
+            entry.className = `transcript-entry ${isFinal ? 'final' : 'partial'}`;
+
+            const label = document.createElement('div');
+            label.className = 'transcript-label';
+            label.textContent = isFinal ? 'Final' : 'Partial';
+
+            const textDiv = document.createElement('div');
+            textDiv.className = 'transcript-text';
+            textDiv.textContent = text;
+
+            entry.appendChild(label);
+            entry.appendChild(textDiv);
+
+            // Remove "Click Start" message if present
+            if (transcriptBox.children.length === 1 &&
+                transcriptBox.children[0].style.color === 'rgb(156, 163, 175)') {
+                transcriptBox.innerHTML = '';
+            }
+
+            // Replace last partial or add new
+            if (!isFinal && transcriptBox.lastChild &&
+                transcriptBox.lastChild.classList.contains('partial')) {
+                transcriptBox.replaceChild(entry, transcriptBox.lastChild);
+            } else {
+                transcriptBox.appendChild(entry);
+            }
+
+            // Auto-scroll
+            transcriptBox.scrollTop = transcriptBox.scrollHeight;
+        }
+
+        async function startRecording() {
+            try {
+                setStatus('connecting', 'Connecting to server...');
+
+                // Build WebSocket URL (wss:// on same host)
+                const wsUrl = `wss://${window.location.host}/ws`;
+
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = async () => {
+                    console.log('WebSocket connected');
+
+                    // Send WhisperLive config message
+                    const config = {
+                        uid: 'browser-' + Date.now(),
+                        task: 'transcribe',
+                        language: languageInput.value,
+                        model: modelSelect.value,
+                        use_vad: false
+                    };
+                    console.log('Sending config:', config);
+                    ws.send(JSON.stringify(config));
+
+                    // Start audio capture with AudioContext
+                    // WhisperLive expects raw Float32 PCM @ 16kHz, NOT WebM/Opus!
+                    mediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            channelCount: 1,
+                            sampleRate: 16000,
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    });
+
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 16000
+                    });
+                    const source = audioContext.createMediaStreamSource(mediaStream);
+
+                    // Create ScriptProcessor for raw audio (Float32)
+                    processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                    processor.onaudioprocess = (e) => {
+                        if (!isRecording || ws.readyState !== WebSocket.OPEN) return;
+
+                        // Send Float32Array directly - WhisperLive expects Float32!
+                        const audioData = e.inputBuffer.getChannelData(0);
+                        ws.send(audioData.buffer);
+                    };
+
+                    source.connect(processor);
+                    processor.connect(audioContext.destination);
+
+                    isRecording = true;
+                    setStatus('recording', 'Recording... Speak now');
+                    startBtn.disabled = true;
+                    stopBtn.disabled = false;
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+
+                        // WhisperLive sends segments array
+                        if (data.segments && data.segments.length > 0) {
+                            // Concatenate all segment texts
+                            const fullText = data.segments.map(s => s.text || '').join('');
+
+                            // Check if last segment is final
+                            const lastSegment = data.segments[data.segments.length - 1];
+                            const isFinal = lastSegment.completed === true;
+
+                            if (fullText.trim()) {
+                                addTranscript(fullText, isFinal);
+                            }
+                        } else if (data.message === 'SERVER_READY') {
+                            console.log('WhisperLive ready');
+                        } else if (data.type === 'error') {
+                            console.error('Server error:', data.message);
+                            setStatus('disconnected', `Error: ${data.message}`);
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse message:', e);
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    setStatus('disconnected', 'Connection error');
+                    stopRecording();
+                };
+
+                ws.onclose = (event) => {
+                    console.log('WebSocket closed. Code:', event.code, 'Reason:', event.reason);
+                    if (isRecording) {
+                        setStatus('disconnected', `Connection closed (${event.code})`);
+                        stopRecording();
+                    }
+                };
+
+            } catch (error) {
+                console.error('Failed to start recording:', error);
+                setStatus('disconnected', `Error: ${error.message}`);
+                stopRecording();
+            }
+        }
+
+        function stopRecording() {
+            isRecording = false;
+
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+
+            ws = null;
+
+            setStatus('disconnected', 'Disconnected');
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+        }
+
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
+    </script>
+</body>
+</html>

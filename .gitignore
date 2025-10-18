@@ -68,8 +68,10 @@ build/
 *.mp3
 *.webm
 *.ogg
+*.pcm
 test_audio/
 sample_audio/
+test_audio.pcm
 
 # AWS
 *.zip

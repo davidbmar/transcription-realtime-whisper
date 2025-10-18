@@ -1,0 +1,28 @@
+https:// {
+    tls /certs/server.crt /certs/server.key
+
+    # WebSocket proxy
+    handle /ws {
+        reverse_proxy {$GPU_HOST}:{$GPU_PORT}
+    }
+
+    # Health check
+    handle /healthz {
+        respond "OK" 200
+    }
+
+    # Static files
+    handle {
+        root * /srv
+        file_server browse
+    }
+
+    log {
+        output stdout
+    }
+}
+
+# HTTP on port 80
+http:// {
+    redir https://{host}{uri} permanent
+}
