@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.3.0</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.0</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -484,13 +484,335 @@
 
     <script>
         // ============================================================
+        // TRANSCRIPT ACCUMULATOR (SPC + EW + BoF)
+        // ============================================================
+        /**
+         * TranscriptAccumulator - Robust partial transcript accumulation
+         *
+         * Solves WhisperLive's sliding window data loss problem using:
+         * 1. SPC (Stability-Prefix Commit): Proactively commit stable prefixes
+         * 2. EW (Eviction Watchdog): Rescue text when window slides
+         * 3. BoF (Backfill-on-Final): Merge finals without dupes
+         *
+         * Problem: WhisperLive's sliding window drops old audio/text when buffer fills.
+         * In fast continuous speech, text can be lost before being marked as final.
+         *
+         * Solution: Don't wait for finals or slide detection. Commit stable prefixes
+         * immediately, and use slide detection as a safety net.
+         */
+        class TranscriptAccumulator {
+            constructor(config = {}) {
+                // SPC: Stability-Prefix Commit parameters
+                this.K = config.stabilityFrames || 2;  // Frames for stability
+                this.Lmin = config.minPrefixLength || 3;  // Min tokens to commit
+                this.T_ms = config.stabilityTimeMs || 1000;  // Time-based stability
+
+                // EW: Eviction Watchdog parameters
+                this.W = config.overlapWindow || 8;  // Token window for comparison
+                this.alpha = config.slideThreshold || 0.4;  // LCP ratio threshold
+                this.beta = config.minSlideLength || 5;  // Min tokens to rescue
+                this.H = config.hysteresisFrames || 2;  // Consecutive frames for slide
+                this.cooldownMs = config.cooldownMs || 250;  // Cooldown after rescue
+
+                // BoF: Backfill-on-Final parameters
+                this.alignWindow = config.alignWindow || 10;  // Alignment window
+
+                // State
+                this.accumulatedText = '';  // Committed text
+                this.workingRemainder = [];  // Uncommitted tokens
+                this.lastPartialTokens = [];  // Previous partial tokens
+                this.stabilityCounters = [];  // Per-token stability counters
+                this.stabilityTimestamp = null;  // When current prefix became stable
+                this.slideCounter = 0;  // Consecutive slide frames
+                this.lastRescueTime = 0;  // Last rescue timestamp (cooldown)
+                this.seenFinals = new Set();  // De-dupe finals
+            }
+
+            /**
+             * Tokenize text to words (normalized for comparison)
+             */
+            tokenize(text) {
+                return text
+                    .toLowerCase()
+                    .replace(/[^\w\s]/g, ' ')  // Remove punctuation
+                    .split(/\s+/)
+                    .filter(t => t.length > 0);
+            }
+
+            /**
+             * Compute Longest Common Prefix in tokens
+             */
+            computeLCP(tokens1, tokens2) {
+                let k = 0;
+                const minLen = Math.min(tokens1.length, tokens2.length);
+                while (k < minLen && tokens1[k] === tokens2[k]) {
+                    k++;
+                }
+                return k;
+            }
+
+            /**
+             * Compute suffix-prefix overlap
+             */
+            computeSPOverlap(tokens1, tokens2) {
+                const maxK = Math.min(this.W, tokens1.length, tokens2.length);
+                for (let k = maxK; k >= 1; k--) {
+                    const suffix = tokens1.slice(-k).join(' ');
+                    const prefix = tokens2.slice(0, k).join(' ');
+                    if (suffix === prefix) {
+                        return k;
+                    }
+                }
+                return 0;
+            }
+
+            /**
+             * SPC: Commit stable prefix if criteria met
+             */
+            commitStablePrefix(currentTokens) {
+                const now = Date.now();
+
+                if (this.workingRemainder.length === 0) {
+                    this.workingRemainder = currentTokens.slice();
+                    this.stabilityCounters = new Array(currentTokens.length).fill(0);
+                    this.stabilityTimestamp = now;
+                    return;
+                }
+
+                // Compute LCP between working remainder and current
+                const lcp = this.computeLCP(this.workingRemainder, currentTokens);
+
+                // Update stability counters
+                for (let i = 0; i < this.stabilityCounters.length; i++) {
+                    if (i < lcp) {
+                        this.stabilityCounters[i]++;
+                    } else {
+                        this.stabilityCounters[i] = 0;
+                    }
+                }
+
+                // Check if prefix meets stability criteria
+                let commitLength = 0;
+                for (let i = 0; i < lcp; i++) {
+                    const stableByFrames = this.stabilityCounters[i] >= this.K;
+                    const stableByTime = (now - this.stabilityTimestamp) >= this.T_ms;
+
+                    if ((stableByFrames || stableByTime) && i >= this.Lmin - 1) {
+                        commitLength = i + 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Commit stable prefix
+                if (commitLength > 0) {
+                    const toCommit = this.workingRemainder.slice(0, commitLength).join(' ');
+                    this.accumulatedText += (this.accumulatedText ? ' ' : '') + toCommit;
+                    console.log('[SPC] Committed stable prefix:', toCommit.substring(0, 50) + '...');
+
+                    // Remove committed tokens from working remainder
+                    this.workingRemainder = this.workingRemainder.slice(commitLength);
+                    this.stabilityCounters = this.stabilityCounters.slice(commitLength);
+                    this.stabilityTimestamp = now;
+                }
+
+                // Update working remainder with new tokens
+                if (lcp < currentTokens.length) {
+                    this.workingRemainder = currentTokens.slice(lcp);
+                    this.stabilityCounters = [
+                        ...this.stabilityCounters.slice(0, lcp),
+                        ...new Array(currentTokens.length - lcp).fill(0)
+                    ];
+                }
+            }
+
+            /**
+             * EW: Check if window slid and rescue if needed
+             */
+            checkAndRescueSlide(currentTokens) {
+                const now = Date.now();
+
+                // Cooldown check
+                if (now - this.lastRescueTime < this.cooldownMs) {
+                    return;
+                }
+
+                if (this.lastPartialTokens.length === 0) {
+                    this.lastPartialTokens = currentTokens.slice();
+                    return;
+                }
+
+                // Compute slide signals
+                const lcpLen = this.computeLCP(this.lastPartialTokens, currentTokens);
+                const lcpRatio = this.lastPartialTokens.length > 0
+                    ? lcpLen / this.lastPartialTokens.length
+                    : 1;
+                const spOverlap = this.computeSPOverlap(this.lastPartialTokens, currentTokens);
+
+                // Check for slide condition
+                const isSlide = (
+                    spOverlap === 0 &&
+                    lcpRatio < this.alpha &&
+                    this.lastPartialTokens.length >= this.beta
+                );
+
+                if (isSlide) {
+                    this.slideCounter++;
+                    console.log(`[EW] Slide detected (${this.slideCounter}/${this.H}): LCP=${lcpRatio.toFixed(2)}, SP=${spOverlap}`);
+
+                    // Hysteresis: require H consecutive slides
+                    if (this.slideCounter >= this.H) {
+                        // RESCUE: Append working remainder before it's lost
+                        if (this.workingRemainder.length > 0) {
+                            const rescued = this.workingRemainder.join(' ');
+                            this.accumulatedText += (this.accumulatedText ? ' ' : '') + rescued;
+                            console.log('[EW] RESCUED uncommitted text:', rescued.substring(0, 50) + '...');
+
+                            // Reset state
+                            this.workingRemainder = currentTokens.slice();
+                            this.stabilityCounters = new Array(currentTokens.length).fill(0);
+                            this.lastRescueTime = now;
+                        }
+
+                        this.slideCounter = 0;
+                    }
+                } else {
+                    // Not a slide, reset counter
+                    this.slideCounter = 0;
+                }
+
+                this.lastPartialTokens = currentTokens.slice();
+            }
+
+            /**
+             * Ingest a partial transcript segment
+             */
+            ingestPartial(text) {
+                const tokens = this.tokenize(text);
+
+                if (tokens.length === 0) return;
+
+                // 1. SPC: Commit stable prefix
+                this.commitStablePrefix(tokens);
+
+                // 2. EW: Check for slide and rescue if needed
+                this.checkAndRescueSlide(tokens);
+            }
+
+            /**
+             * BoF: Ingest a final transcript segment
+             */
+            ingestFinal(text) {
+                const normalized = text.trim();
+
+                // De-dupe exact finals
+                if (this.seenFinals.has(normalized)) {
+                    console.log('[BoF] Skipping duplicate final');
+                    return;
+                }
+                this.seenFinals.add(normalized);
+
+                // Commit any remaining working remainder first
+                if (this.workingRemainder.length > 0) {
+                    const remaining = this.workingRemainder.join(' ');
+                    this.accumulatedText += (this.accumulatedText ? ' ' : '') + remaining;
+                    console.log('[BoF] Flushed remaining:', remaining.substring(0, 50) + '...');
+                    this.workingRemainder = [];
+                    this.stabilityCounters = [];
+                }
+
+                // Align final with accumulated tail to avoid dupes
+                const finalTokens = this.tokenize(normalized);
+                const accTokens = this.tokenize(this.accumulatedText);
+
+                if (accTokens.length > 0 && finalTokens.length > 0) {
+                    // Check for overlap in last W tokens
+                    const tailStart = Math.max(0, accTokens.length - this.alignWindow);
+                    const tail = accTokens.slice(tailStart);
+
+                    let overlapLen = 0;
+                    for (let k = Math.min(this.alignWindow, finalTokens.length); k >= 1; k--) {
+                        const tailSuffix = tail.slice(-k).join(' ');
+                        const finalPrefix = finalTokens.slice(0, k).join(' ');
+                        if (tailSuffix === finalPrefix) {
+                            overlapLen = k;
+                            break;
+                        }
+                    }
+
+                    // Drop overlapped prefix from final
+                    const uniqueFinalTokens = finalTokens.slice(overlapLen);
+                    if (uniqueFinalTokens.length > 0) {
+                        const uniqueText = uniqueFinalTokens.join(' ');
+                        this.accumulatedText += (this.accumulatedText ? ' ' : '') + uniqueText;
+                        console.log(`[BoF] Added final (overlap=${overlapLen}):`, uniqueText.substring(0, 50) + '...');
+                    } else {
+                        console.log('[BoF] Final fully overlaps accumulated text');
+                    }
+                } else {
+                    // No overlap possible, just append
+                    this.accumulatedText += (this.accumulatedText ? ' ' : '') + normalized;
+                    console.log('[BoF] Added final:', normalized.substring(0, 50) + '...');
+                }
+
+                // Reset partial tracking
+                this.lastPartialTokens = [];
+                this.slideCounter = 0;
+            }
+
+            /**
+             * Get the full accumulated text
+             */
+            getFullText() {
+                return this.accumulatedText;
+            }
+
+            /**
+             * Get preview text (accumulated + current working remainder)
+             */
+            getPreviewText() {
+                let preview = this.accumulatedText;
+                if (this.workingRemainder.length > 0) {
+                    const remainder = this.workingRemainder.join(' ');
+                    preview += (preview ? ' ' : '') + remainder;
+                }
+                return preview;
+            }
+
+            /**
+             * Reset for new recording session
+             */
+            reset() {
+                this.accumulatedText = '';
+                this.workingRemainder = [];
+                this.lastPartialTokens = [];
+                this.stabilityCounters = [];
+                this.stabilityTimestamp = null;
+                this.slideCounter = 0;
+                this.lastRescueTime = 0;
+                this.seenFinals.clear();
+                console.log('[Accumulator] Reset for new session');
+            }
+        }
+
+        // ============================================================
         // SESSION MANAGEMENT
         // ============================================================
         let sessionId = null;
         let fullTranscript = [];  // Array of {text, isFinal, timestamp}
-        let seenFinalTexts = new Set();  // Track unique final transcripts
-        let accumulatedText = '';  // Accumulated complete transcript
-        let lastPartialText = '';  // Track last partial to detect new text
+
+        // Create transcript accumulator instance
+        const transcriptAccumulator = new TranscriptAccumulator({
+            stabilityFrames: 2,      // SPC: 2 frames for stability
+            minPrefixLength: 3,      // SPC: min 3 tokens to commit
+            stabilityTimeMs: 1000,   // SPC: or 1 second
+            overlapWindow: 8,        // EW: 8-token window
+            slideThreshold: 0.4,     // EW: LCP ratio < 0.4 = slide
+            minSlideLength: 5,       // EW: min 5 tokens to rescue
+            hysteresisFrames: 2,     // EW: 2 consecutive slides
+            cooldownMs: 250,         // EW: 250ms cooldown
+            alignWindow: 10          // BoF: 10-token alignment
+        });
 
         function generateSessionId() {
             // Generate a short, readable session ID (8 chars)
@@ -562,12 +884,8 @@
         let lastDisplayedText = '';  // Track last displayed text to avoid duplicates
 
         function updateTranscriptPreview() {
-            // Show accumulated text + current partial
-            let previewText = accumulatedText;
-
-            if (lastPartialText && lastPartialText !== accumulatedText) {
-                previewText += (previewText ? ' ' : '') + lastPartialText;
-            }
+            // Get preview text from accumulator (committed + working remainder)
+            const previewText = transcriptAccumulator.getPreviewText();
 
             if (previewText.trim()) {
                 transcriptPreview.classList.remove('empty');
@@ -582,29 +900,16 @@
         }
 
         function addTranscript(text, isFinal = false) {
-            // Normalize text for comparison (trim whitespace)
-            const normalizedText = text.trim();
+            if (!text || !text.trim()) return;
 
-            // Accumulate text to prevent loss from sliding window
+            // Feed text to accumulator (SPC + EW + BoF logic)
             if (isFinal) {
-                // Final segment - save to accumulated
-                if (seenFinalTexts.has(normalizedText)) {
-                    console.log('Skipping duplicate final:', normalizedText.substring(0, 50) + '...');
-                    return;
-                }
-                seenFinalTexts.add(normalizedText);
-                accumulatedText += (accumulatedText ? ' ' : '') + normalizedText;
-                lastPartialText = '';  // Reset partial tracking
+                transcriptAccumulator.ingestFinal(text);
             } else {
-                // Partial segment - check if window slid
-                if (lastPartialText && !normalizedText.includes(lastPartialText.substring(0, 50))) {
-                    // Window slid! Save the old partial before it's lost
-                    console.log('Window slid - saving previous partial');
-                    accumulatedText += (accumulatedText ? ' ' : '') + lastPartialText;
-                }
-                lastPartialText = normalizedText;
+                transcriptAccumulator.ingestPartial(text);
             }
 
+            // Update UI: Display transcript entry in left pane
             const entry = document.createElement('div');
             entry.className = `transcript-entry ${isFinal ? 'final' : 'partial'}`;
 
@@ -633,23 +938,10 @@
                 transcriptBox.appendChild(entry);
             }
 
-            // Track in fullTranscript array for export
-            // WhisperLive sends CUMULATIVE finals, so replace (don't append)
-            if (isFinal) {
-                seenFinalTexts.add(normalizedText);
-
-                // Replace fullTranscript with just the latest cumulative text
-                fullTranscript = [{
-                    text: text,
-                    isFinal: true,
-                    timestamp: new Date().toISOString()
-                }];
-            }
-
-            // Update preview for both finals and partials
+            // Update preview (AI Assistant panel)
             updateTranscriptPreview();
 
-            // Auto-scroll
+            // Auto-scroll both panels
             transcriptBox.scrollTop = transcriptBox.scrollHeight;
         }
 
@@ -657,10 +949,8 @@
             try {
                 // Reset all tracking for new session
                 lastDisplayedText = '';
-                seenFinalTexts.clear();
                 fullTranscript = [];
-                accumulatedText = '';
-                lastPartialText = '';
+                transcriptAccumulator.reset();  // Reset SPC + EW + BoF state
 
                 setStatus('connecting', 'Connecting to server...');
 
@@ -830,12 +1120,8 @@
 
         // Copy transcript button
         copyTranscriptBtn.addEventListener('click', async () => {
-            // Use accumulated text + current partial
-            let fullText = accumulatedText;
-
-            if (lastPartialText && lastPartialText !== accumulatedText) {
-                fullText += (fullText ? ' ' : '') + lastPartialText;
-            }
+            // Get full transcript from accumulator (committed + working remainder)
+            const fullText = transcriptAccumulator.getPreviewText();
 
             if (!fullText.trim()) {
                 alert('No transcript available yet. Start recording first!');
@@ -858,10 +1144,8 @@
 
         // Download transcript button
         downloadTranscriptBtn.addEventListener('click', () => {
-            const fullText = fullTranscript
-                .filter(item => item.isFinal)
-                .map(item => item.text)
-                .join('\n\n');
+            // Get full transcript from accumulator
+            const fullText = transcriptAccumulator.getPreviewText();
 
             if (!fullText.trim()) {
                 alert('No transcript available yet. Start recording first!');
