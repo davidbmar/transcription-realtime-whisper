@@ -110,16 +110,16 @@ git clone https://github.com/davidbmar/transcription-realtime-whisper.git
 cd transcription-realtime-whisper
 
 # 2. Initial setup (000-040)
-./scripts/010-setup-build-box.sh         # 5 min - Install dependencies
-./scripts/020-deploy-gpu-instance.sh     # 10 min - Create GPU instance
-./scripts/030-configure-gpu-security.sh  # 1 min - Configure security
+./scripts/010-setup-build-box.sh             # 5 min - Install dependencies
+./scripts/020-deploy-gpu-instance.sh         # 10 min - Create GPU instance
 
-# 3. WhisperLive deployment (300-320)
-./scripts/305-setup-whisperlive-edge.sh  # 5 min - Setup edge proxy
-./scripts/310-configure-whisperlive-gpu.sh  # 10 min - Install WhisperLive
-./scripts/040-configure-edge-security.sh # 1 min - Edge security
-./scripts/320-update-edge-clients.sh     # 1 min - Deploy browser UI
-./scripts/315-test-whisperlive-connection.sh  # 1 min - Validate
+# 3. WhisperLive deployment (300-320) - DEFAULT
+./scripts/305-setup-whisperlive-edge.sh      # 5 min - Setup edge proxy
+./scripts/310-configure-whisperlive-gpu.sh   # 10 min - Install WhisperLive on GPU
+./scripts/030-configure-gpu-security.sh      # 1 min - Allow edge→GPU access (port 9090)
+./scripts/031-configure-edge-box-security.sh # 1 min - Manage client access (ports 80, 443)
+./scripts/320-update-edge-clients.sh         # 1 min - Deploy browser UI
+./scripts/315-test-whisperlive-connection.sh # 1 min - Validate
 
 # 4. Open in browser
 open https://YOUR_EDGE_IP/
@@ -132,7 +132,9 @@ open https://YOUR_EDGE_IP/
 For enterprise-grade accuracy with NVIDIA Riva:
 
 ```bash
-# After initial setup (000-040), deploy Riva:
+# After initial setup, deploy Riva with --riva flag:
+./scripts/030-configure-gpu-security.sh --riva          # Ports 50051, 8000
+./scripts/031-configure-edge-box-security.sh --riva     # Ports 8443, 8444
 ./scripts/125-deploy-conformer-from-s3-cache.sh
 ./scripts/126-validate-conformer-deployment.sh
 ./scripts/155-deploy-buildbox-websocket-bridge-service.sh

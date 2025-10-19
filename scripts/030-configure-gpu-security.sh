@@ -5,20 +5,29 @@ exec > >(tee -a "logs/$(basename $0 .sh)-$(date +%Y%m%d-%H%M%S).log") 2>&1
 # ==================================================================
 # 030: Configure GPU Security Groups (Internal-Only Access)
 # ==================================================================
-# Locks down GPU worker to accept connections ONLY from build box.
-# This script is fully automated - no interactive prompts.
+# Locks down GPU worker to accept connections ONLY from edge box.
+#
+# DEFAULT: WhisperLive deployment (port 9090)
+# LEGACY: Use --riva flag for NVIDIA Riva deployment (ports 50051, 8000)
 #
 # Security Model:
 #   GPU Worker = Internal-only, never exposed to internet
-#   Only build box can access GPU ports: 22 (SSH), 50051 (gRPC), 8000 (HTTP)
+#   Only edge box can access GPU ports
 #
 # Usage:
-#   ./scripts/030-configure-gpu-security.sh
+#   ./scripts/030-configure-gpu-security.sh           # WhisperLive (default)
+#   ./scripts/030-configure-gpu-security.sh --riva    # NVIDIA Riva (legacy)
 # ==================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$PROJECT_ROOT/.env"
+
+# Parse command line arguments
+DEPLOYMENT_MODE="whisperlive"  # Default
+if [ "${1:-}" == "--riva" ]; then
+    DEPLOYMENT_MODE="riva"
+fi
 
 # Source common functions
 source "$SCRIPT_DIR/riva-common-functions.sh"
@@ -34,10 +43,21 @@ NC='\033[0m'
 echo -e "${BLUE}🔒 GPU Security Group Configuration (Internal-Only Access)${NC}"
 echo "================================================================"
 echo ""
-echo -e "${CYAN}Security Model:${NC}"
-echo "  GPU Worker: INTERNAL-ONLY access from build box"
-echo "  Ports: 22 (SSH), 50051 (gRPC), 8000 (HTTP)"
-echo "  Client Access: Use script 031 to manage build box clients"
+if [ "$DEPLOYMENT_MODE" == "riva" ]; then
+    echo -e "${YELLOW}MODE: NVIDIA Riva (Legacy)${NC}"
+    echo ""
+    echo -e "${CYAN}Security Model:${NC}"
+    echo "  GPU Worker: INTERNAL-ONLY access from build box"
+    echo "  Ports: 22 (SSH), 50051 (RIVA gRPC), 8000 (RIVA HTTP)"
+    echo "  Client Access: Use script 031 --riva to manage build box clients"
+else
+    echo -e "${GREEN}MODE: WhisperLive (Default)${NC}"
+    echo ""
+    echo -e "${CYAN}Security Model:${NC}"
+    echo "  GPU Worker: INTERNAL-ONLY access from edge box"
+    echo "  Ports: 22 (SSH), 9090 (WhisperLive WebSocket)"
+    echo "  Client Access: Use script 031 to manage edge box clients"
+fi
 echo "================================================================"
 echo ""
 
@@ -66,12 +86,21 @@ if [ -z "$AWS_REGION" ]; then
     exit 1
 fi
 
-# GPU configuration
+# GPU configuration based on deployment mode
 GPU_SG="$SECURITY_GROUP_ID"
-GPU_PORTS=(22 50051 8000)
-GPU_PORT_DESCRIPTIONS=("SSH" "RIVA gRPC" "RIVA HTTP/Health")
+
+if [ "$DEPLOYMENT_MODE" == "riva" ]; then
+    GPU_PORTS=(22 50051 8000)
+    GPU_PORT_DESCRIPTIONS=("SSH" "RIVA gRPC" "RIVA HTTP/Health")
+    EDGE_BOX_NAME="Build Box"
+else
+    GPU_PORTS=(22 9090)
+    GPU_PORT_DESCRIPTIONS=("SSH" "WhisperLive WebSocket")
+    EDGE_BOX_NAME="Edge Box"
+fi
 
 echo -e "${CYAN}Configuration:${NC}"
+echo "  Deployment Mode: $DEPLOYMENT_MODE"
 echo "  GPU Security Group: $GPU_SG"
 echo "  GPU Instance IP: ${GPU_INSTANCE_IP:-<not set>}"
 echo "  AWS Region: $AWS_REGION"
@@ -79,36 +108,36 @@ echo "  Ports: ${GPU_PORTS[*]}"
 echo ""
 
 # ==================================================================
-# Step 1: Auto-detect Build Box IP
+# Step 1: Auto-detect Edge Box IP
 # ==================================================================
-echo -e "${CYAN}Step 1: Auto-detecting Build Box IP...${NC}"
+echo -e "${CYAN}Step 1: Auto-detecting $EDGE_BOX_NAME IP...${NC}"
 echo "----------------------------------------"
 
 # Try multiple methods to get public IP
-BUILDBOX_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || \
+EDGE_BOX_IP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || \
               curl -s --max-time 5 icanhazip.com 2>/dev/null || \
               curl -s --max-time 5 ipinfo.io/ip 2>/dev/null || \
               echo "")
 
-if [ -z "$BUILDBOX_IP" ]; then
-    log_error "Failed to auto-detect build box public IP"
+if [ -z "$EDGE_BOX_IP" ]; then
+    log_error "Failed to auto-detect $EDGE_BOX_NAME public IP"
     echo ""
-    echo "Please manually enter the build box public IP:"
-    read -p "Build Box IP: " BUILDBOX_IP
+    echo "Please manually enter the $EDGE_BOX_NAME public IP:"
+    read -p "$EDGE_BOX_NAME IP: " EDGE_BOX_IP
 
-    if [ -z "$BUILDBOX_IP" ]; then
-        log_error "Build box IP is required"
+    if [ -z "$EDGE_BOX_IP" ]; then
+        log_error "$EDGE_BOX_NAME IP is required"
         exit 1
     fi
 fi
 
 # Validate IP format
-if [[ ! "$BUILDBOX_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-    log_error "Invalid IP format: $BUILDBOX_IP"
+if [[ ! "$EDGE_BOX_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+    log_error "Invalid IP format: $EDGE_BOX_IP"
     exit 1
 fi
 
-log_success "Detected build box IP: $BUILDBOX_IP"
+log_success "Detected $EDGE_BOX_NAME IP: $EDGE_BOX_IP"
 echo ""
 
 # ==================================================================
@@ -140,7 +169,7 @@ echo ""
 echo -e "${YELLOW}Step 3: Clear existing rules?${NC}"
 echo "----------------------------------------"
 echo "Options:"
-echo "  1) Keep existing rules and add build box IP (recommended)"
+echo "  1) Keep existing rules and add $EDGE_BOX_NAME IP (recommended)"
 echo "  2) Delete all rules and start fresh"
 echo ""
 read -p "Enter choice [1-2] (default: 1): " delete_choice
@@ -170,9 +199,9 @@ fi
 echo ""
 
 # ==================================================================
-# Step 4: Apply Build Box IP to GPU Ports
+# Step 4: Apply Edge Box IP to GPU Ports
 # ==================================================================
-echo -e "${CYAN}Step 4: Applying Build Box IP to GPU Ports${NC}"
+echo -e "${CYAN}Step 4: Applying $EDGE_BOX_NAME IP to GPU Ports${NC}"
 echo "----------------------------------------"
 
 ADDED_COUNT=0
@@ -182,14 +211,14 @@ for i in "${!GPU_PORTS[@]}"; do
     PORT="${GPU_PORTS[$i]}"
     DESC="${GPU_PORT_DESCRIPTIONS[$i]}"
 
-    echo -n "  Port $PORT ($DESC): Adding $BUILDBOX_IP..."
+    echo -n "  Port $PORT ($DESC): Adding $EDGE_BOX_IP..."
 
     RESULT=$(aws ec2 authorize-security-group-ingress \
         --region "$AWS_REGION" \
         --group-id "$GPU_SG" \
         --protocol tcp \
         --port "$PORT" \
-        --cidr "${BUILDBOX_IP}/32" 2>&1)
+        --cidr "${EDGE_BOX_IP}/32" 2>&1)
 
     if echo "$RESULT" | grep -q "already exists"; then
         echo -e " ${YELLOW}already exists${NC}"
@@ -225,13 +254,13 @@ echo "$FINAL_RULES" | jq -r '.[] | "Port \(.FromPort): \([.IpRanges[].CidrIp] | 
     sort -n | sed 's/^/  /'
 
 echo ""
-echo "Build Box Access:"
+echo "$EDGE_BOX_NAME Access:"
 echo "-----------------"
-echo "$FINAL_RULES" | jq -r --arg buildbox_ip "${BUILDBOX_IP}/32" '
+echo "$FINAL_RULES" | jq -r --arg edge_ip "${EDGE_BOX_IP}/32" '
     .[] |
-    select(.IpRanges[].CidrIp == $buildbox_ip) |
+    select(.IpRanges[].CidrIp == $edge_ip) |
     .FromPort
-' | sort -n | tr '\n' ' ' | awk -v ip="$BUILDBOX_IP" '{print "  " ip ": ports " $0}'
+' | sort -n | tr '\n' ' ' | awk -v ip="$EDGE_BOX_IP" '{print "  " ip ": ports " $0}'
 
 echo ""
 echo ""
@@ -244,19 +273,29 @@ log_success "GPU SECURITY CONFIGURATION COMPLETE"
 log_success "═══════════════════════════════════════════════════════════"
 echo ""
 echo "Configuration Summary:"
+echo "  Deployment Mode: $DEPLOYMENT_MODE"
 echo "  Security Group: $GPU_SG"
-echo "  Build Box IP: $BUILDBOX_IP"
+echo "  $EDGE_BOX_NAME IP: $EDGE_BOX_IP"
 echo "  GPU Instance IP: ${GPU_INSTANCE_IP:-<not set>}"
 echo "  Ports Configured: ${GPU_PORTS[*]}"
 echo ""
 echo "Security Model:"
-echo "  ✅ GPU accepts connections ONLY from build box"
-echo "  ✅ Ports 22, 50051, 8000 locked to ${BUILDBOX_IP}"
+echo "  ✅ GPU accepts connections ONLY from $EDGE_BOX_NAME"
+echo "  ✅ Ports ${GPU_PORTS[*]} locked to ${EDGE_BOX_IP}"
 echo "  ❌ GPU is NOT accessible from internet"
 echo ""
-echo "Next Steps:"
-echo "  • Manage client access: ./scripts/031-configure-buildbox-security.sh"
-echo "  • Deploy GPU model: ./scripts/110-deploy-conformer-streaming.sh"
-echo "  • Check GPU status: ./scripts/750-status-gpu-instance.sh"
+
+if [ "$DEPLOYMENT_MODE" == "riva" ]; then
+    echo "Next Steps (RIVA deployment):"
+    echo "  • Manage client access: ./scripts/031-configure-edge-box-security.sh --riva"
+    echo "  • Deploy RIVA model: ./scripts/125-deploy-conformer-from-s3-cache.sh"
+    echo "  • Deploy WebSocket bridge: ./scripts/155-deploy-buildbox-websocket-bridge-service.sh"
+else
+    echo "Next Steps (WhisperLive deployment):"
+    echo "  • Manage client access: ./scripts/031-configure-edge-box-security.sh"
+    echo "  • Setup edge proxy: ./scripts/305-setup-whisperlive-edge.sh"
+    echo "  • Configure WhisperLive: ./scripts/310-configure-whisperlive-gpu.sh"
+    echo "  • Deploy browser clients: ./scripts/320-update-edge-clients.sh"
+fi
 echo ""
 echo "================================================================"

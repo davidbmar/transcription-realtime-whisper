@@ -3,26 +3,35 @@
 exec > >(tee -a "logs/$(basename $0 .sh)-$(date +%Y%m%d-%H%M%S).log") 2>&1
 
 # ==================================================================
-# 031: Configure Build Box Security Groups (Client Management)
+# 031: Configure Edge Box Security Groups (Client Management)
 # ==================================================================
-# Manages client access to build box web services (WebSocket bridge + demo).
+# Manages client access to edge box web services.
 # Interactive menu to add/remove/list authorized client IPs.
 #
+# DEFAULT: WhisperLive deployment (ports 80, 443)
+# LEGACY: Use --riva flag for NVIDIA Riva deployment (ports 8443, 8444)
+#
 # Security Model:
-#   Build Box = Public-facing with explicit IP allowlist
-#   Ports: 22 (SSH), 8443 (WebSocket), 8444 (HTTPS demo)
+#   Edge Box = Public-facing with explicit IP allowlist
 #
 # Client Storage:
 #   authorized_clients.txt - Persistent list of authorized clients
 #
 # Usage:
-#   ./scripts/031-configure-buildbox-security.sh
+#   ./scripts/031-configure-edge-box-security.sh           # WhisperLive (default)
+#   ./scripts/031-configure-edge-box-security.sh --riva    # NVIDIA Riva (legacy)
 # ==================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$PROJECT_ROOT/.env"
 CLIENTS_FILE="$PROJECT_ROOT/authorized_clients.txt"
+
+# Parse command line arguments
+DEPLOYMENT_MODE="whisperlive"  # Default
+if [ "${1:-}" == "--riva" ]; then
+    DEPLOYMENT_MODE="riva"
+fi
 
 # Source common functions
 source "$SCRIPT_DIR/riva-common-functions.sh"
@@ -36,12 +45,22 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
 
-echo -e "${BLUE}🔒 Build Box Security Group Configuration (Client Management)${NC}"
+echo -e "${BLUE}🔒 Edge Box Security Group Configuration (Client Management)${NC}"
 echo "================================================================"
 echo ""
-echo -e "${CYAN}Security Model:${NC}"
-echo "  Build Box: PUBLIC-FACING with explicit client allowlist"
-echo "  Ports: 22 (SSH), 8443 (WebSocket), 8444 (HTTPS demo)"
+if [ "$DEPLOYMENT_MODE" == "riva" ]; then
+    echo -e "${YELLOW}MODE: NVIDIA Riva (Legacy)${NC}"
+    echo ""
+    echo -e "${CYAN}Security Model:${NC}"
+    echo "  Build Box: PUBLIC-FACING with explicit client allowlist"
+    echo "  Ports: 22 (SSH), 8443 (WebSocket Bridge), 8444 (HTTPS Demo)"
+else
+    echo -e "${GREEN}MODE: WhisperLive (Default)${NC}"
+    echo ""
+    echo -e "${CYAN}Security Model:${NC}"
+    echo "  Edge Box: PUBLIC-FACING with explicit client allowlist"
+    echo "  Ports: 22 (SSH), 80 (HTTP), 443 (HTTPS Caddy Proxy)"
+fi
 echo "  GPU Access: Use script 030 to configure GPU security"
 echo "================================================================"
 echo ""
@@ -55,10 +74,11 @@ fi
 source "$ENV_FILE"
 
 # Validate and auto-detect BUILDBOX_SECURITY_GROUP if not set
+# (Variable name kept for backward compatibility)
 if [ -z "$BUILDBOX_SECURITY_GROUP" ]; then
     log_warn "BUILDBOX_SECURITY_GROUP not set in .env"
     echo ""
-    echo -e "${CYAN}Auto-detecting build box security group...${NC}"
+    echo -e "${CYAN}Auto-detecting edge box security group...${NC}"
 
     # Try to get instance ID from metadata service (supports both IMDSv1 and IMDSv2)
     # Try IMDSv2 first (token-based)
@@ -159,16 +179,25 @@ if [ -z "$BUILDBOX_PUBLIC_IP" ]; then
     fi
 fi
 
-# Build box configuration
-BUILDBOX_SG="$BUILDBOX_SECURITY_GROUP"
-BUILDBOX_PORTS=(22 8443 8444)
-BUILDBOX_PORT_DESCRIPTIONS=("SSH" "WebSocket Bridge (WSS)" "HTTPS Demo Server")
+# Edge box configuration based on deployment mode
+EDGE_BOX_SG="$BUILDBOX_SECURITY_GROUP"  # Variable name kept for backward compatibility
+
+if [ "$DEPLOYMENT_MODE" == "riva" ]; then
+    EDGE_BOX_PORTS=(22 8443 8444)
+    EDGE_BOX_PORT_DESCRIPTIONS=("SSH" "WebSocket Bridge (WSS)" "HTTPS Demo Server")
+    EDGE_BOX_NAME="Build Box"
+else
+    EDGE_BOX_PORTS=(22 80 443)
+    EDGE_BOX_PORT_DESCRIPTIONS=("SSH" "HTTP (redirects to HTTPS)" "HTTPS Caddy Proxy")
+    EDGE_BOX_NAME="Edge Box"
+fi
 
 echo -e "${CYAN}Configuration:${NC}"
-echo "  Build Box Security Group: $BUILDBOX_SG"
-echo "  Build Box IP: ${BUILDBOX_PUBLIC_IP:-<not set>}"
+echo "  Deployment Mode: $DEPLOYMENT_MODE"
+echo "  $EDGE_BOX_NAME Security Group: $EDGE_BOX_SG"
+echo "  $EDGE_BOX_NAME IP: ${BUILDBOX_PUBLIC_IP:-<not set>}"
 echo "  AWS Region: $AWS_REGION"
-echo "  Ports: ${BUILDBOX_PORTS[*]}"
+echo "  Ports: ${EDGE_BOX_PORTS[*]}"
 echo "  Client File: $CLIENTS_FILE"
 echo ""
 
@@ -243,7 +272,7 @@ EOF
 # AWS Security Group Functions
 # ==================================================================
 
-# Add IP to all build box ports
+# Add IP to all edge box ports
 add_ip_to_aws() {
     local ip=$1
     local label=$2
@@ -253,10 +282,10 @@ add_ip_to_aws() {
     local added=0
     local existed=0
 
-    for port in "${BUILDBOX_PORTS[@]}"; do
+    for port in "${EDGE_BOX_PORTS[@]}"; do
         RESULT=$(aws ec2 authorize-security-group-ingress \
             --region "$AWS_REGION" \
-            --group-id "$BUILDBOX_SG" \
+            --group-id "$EDGE_BOX_SG" \
             --protocol tcp \
             --port "$port" \
             --cidr "${ip}/32" 2>&1)
@@ -284,7 +313,7 @@ add_ip_to_aws() {
     fi
 }
 
-# Remove IP from all build box ports
+# Remove IP from all edge box ports
 remove_ip_from_aws() {
     local ip=$1
 
@@ -294,10 +323,10 @@ remove_ip_from_aws() {
     local failed=0
     local not_found=0
 
-    for port in "${BUILDBOX_PORTS[@]}"; do
+    for port in "${EDGE_BOX_PORTS[@]}"; do
         RESULT=$(aws ec2 revoke-security-group-ingress \
             --region "$AWS_REGION" \
-            --group-id "$BUILDBOX_SG" \
+            --group-id "$EDGE_BOX_SG" \
             --protocol tcp \
             --port "$port" \
             --cidr "${ip}/32" 2>&1)
@@ -314,7 +343,7 @@ remove_ip_from_aws() {
         fi
     done
 
-    local total_ports=${#BUILDBOX_PORTS[@]}
+    local total_ports=${#EDGE_BOX_PORTS[@]}
 
     # Show clearer message based on what happened
     if [ $removed -eq $total_ports ]; then
