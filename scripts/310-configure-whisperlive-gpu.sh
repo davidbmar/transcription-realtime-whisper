@@ -188,7 +188,7 @@ Type=simple
 User=$USER
 WorkingDirectory=$HOME/whisperlive/WhisperLive
 Environment="PATH=$HOME/whisperlive/WhisperLive/venv/bin"
-ExecStart=$HOME/whisperlive/WhisperLive/venv/bin/python3 -m whisper_live.server \\
+ExecStart=$HOME/whisperlive/WhisperLive/venv/bin/python3 run_server.py \\
     --port 9090 \\
     --backend faster_whisper
 
