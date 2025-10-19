@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.3</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.5.0</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -526,6 +526,7 @@
                 this.slideCounter = 0;  // Consecutive slide frames
                 this.lastRescueTime = 0;  // Last rescue timestamp (cooldown)
                 this.seenFinals = new Set();  // De-dupe finals
+                this.totalCommittedTokens = 0;  // Total tokens committed from cumulative stream
             }
 
             /**
@@ -568,24 +569,33 @@
 
             /**
              * SPC: Commit stable prefix if criteria met
-             * Uses lastPartialTokens to track previous frame for LCP comparison
+             * WhisperLive sends CUMULATIVE partials, so we track totalCommittedTokens
+             * and only analyze the uncommitted suffix
              */
             commitStablePrefix(currentTokens) {
                 const now = Date.now();
 
+                // Extract uncommitted suffix from cumulative stream
+                const uncommittedTokens = currentTokens.slice(this.totalCommittedTokens);
+
                 // First partial: initialize and return
-                if (this.workingRemainder.length === 0) {
-                    this.workingRemainder = currentTokens.slice();
-                    this.lastPartialTokens = currentTokens.slice();
-                    this.stabilityCounters = new Array(currentTokens.length).fill(0);
+                if (this.workingRemainder.length === 0 && uncommittedTokens.length > 0) {
+                    this.workingRemainder = uncommittedTokens.slice();
+                    this.lastPartialTokens = uncommittedTokens.slice();
+                    this.stabilityCounters = new Array(uncommittedTokens.length).fill(0);
                     this.stabilityTimestamp = now;
-                    console.log('[SPC] Initialized with', currentTokens.length, 'tokens');
+                    console.log('[SPC] Initialized with', uncommittedTokens.length, 'uncommitted tokens');
                     return;
                 }
 
-                // Compute LCP between LAST partial and CURRENT partial (not working remainder!)
-                const lcp = this.computeLCP(this.lastPartialTokens, currentTokens);
-                console.log('[SPC] LCP=', lcp, 'of', this.lastPartialTokens.length, 'tokens');
+                // If no uncommitted tokens, nothing to do
+                if (uncommittedTokens.length === 0) {
+                    return;
+                }
+
+                // Compute LCP between LAST partial and CURRENT partial (uncommitted portions)
+                const lcp = this.computeLCP(this.lastPartialTokens, uncommittedTokens);
+                console.log('[SPC] LCP=', lcp, 'of', this.lastPartialTokens.length, 'uncommitted tokens');
 
                 // Update stability counters for matching prefix
                 const limit = Math.min(lcp, this.workingRemainder.length);
@@ -622,19 +632,22 @@
                 if (commitLength > 0) {
                     const toCommit = this.workingRemainder.slice(0, commitLength).join(' ');
                     this.accumulatedText += (this.accumulatedText ? ' ' : '') + toCommit;
-                    console.log('[SPC] ✅ Committed:', toCommit.substring(0, 50) + '...');
+                    console.log('[SPC] ✅ Committed:', toCommit.substring(0, 50) + '... (tokens committed:', commitLength + ')');
 
-                    // CRITICAL: Shrink working remainder and counters
+                    // CRITICAL: Track total committed from cumulative stream
+                    this.totalCommittedTokens += commitLength;
+
+                    // Shrink working remainder and counters
                     this.workingRemainder = this.workingRemainder.slice(commitLength);
                     this.stabilityCounters = this.stabilityCounters.slice(commitLength);
                     this.stabilityTimestamp = now;
                 }
 
-                // Update last partial snapshot for next frame's comparison
-                this.lastPartialTokens = currentTokens.slice();
+                // Update last partial snapshot for next frame's comparison (uncommitted portion)
+                this.lastPartialTokens = uncommittedTokens.slice();
 
-                // Update working remainder to current tokens (show latest wording in UI)
-                this.workingRemainder = currentTokens.slice();
+                // Update working remainder to latest uncommitted tokens (show latest wording in UI)
+                this.workingRemainder = uncommittedTokens.slice();
 
                 // Ensure counters array matches new length
                 const deficit = this.workingRemainder.length - this.stabilityCounters.length;
@@ -813,6 +826,7 @@
                 this.slideCounter = 0;
                 this.lastRescueTime = 0;
                 this.seenFinals.clear();
+                this.totalCommittedTokens = 0;
                 console.log('[Accumulator] Reset for new session');
             }
         }
