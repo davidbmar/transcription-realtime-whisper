@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.2</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.3</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -598,16 +598,22 @@
                 }
 
                 // Check if prefix meets stability criteria
+                // Step 1: Find longest contiguous stable prefix
                 let commitLength = 0;
                 for (let i = 0; i < limit; i++) {
                     const stableByFrames = this.stabilityCounters[i] >= this.K;
                     const stableByTime = (now - this.stabilityTimestamp) >= this.T_ms;
 
-                    if ((stableByFrames || stableByTime) && i >= this.Lmin - 1) {
-                        commitLength = i + 1;
+                    if (stableByFrames || stableByTime) {
+                        commitLength = i + 1;  // Keep extending
                     } else {
-                        break;
+                        break;  // Stop at first unstable position
                     }
+                }
+
+                // Step 2: Only commit if prefix is long enough
+                if (commitLength < this.Lmin) {
+                    commitLength = 0;
                 }
 
                 console.log('[SPC] Counters:', this.stabilityCounters.slice(0, 5), 'commitLength=', commitLength);
