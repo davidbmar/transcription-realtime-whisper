@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.1.0</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.2.0</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -560,15 +560,26 @@
         let lastDisplayedText = '';  // Track last displayed text to avoid duplicates
 
         function updateTranscriptPreview() {
-            // Update the AI panel preview with full transcript
-            const finalTexts = fullTranscript
-                .filter(item => item.isFinal)
-                .map(item => item.text)
+            // Update the AI panel preview with visible transcript
+            const entries = transcriptBox.querySelectorAll('.transcript-entry');
+
+            if (entries.length === 0) {
+                transcriptPreview.classList.add('empty');
+                transcriptPreview.innerHTML = '<p>Transcript will appear here...</p><p style="margin-top: 10px; font-size: 12px;">You can copy or download the full transcript to use with Claude or other AI tools.</p>';
+                return;
+            }
+
+            // Get all finals, or if none, get the last partial
+            const finalEntries = Array.from(entries).filter(e => e.classList.contains('final'));
+            const entriesToShow = finalEntries.length > 0 ? finalEntries : [entries[entries.length - 1]];
+
+            const previewText = entriesToShow
+                .map(entry => entry.querySelector('.transcript-text').textContent)
                 .join('\n\n');
 
-            if (finalTexts.trim()) {
+            if (previewText.trim()) {
                 transcriptPreview.classList.remove('empty');
-                transcriptPreview.textContent = finalTexts;
+                transcriptPreview.textContent = previewText;
             } else {
                 transcriptPreview.classList.add('empty');
                 transcriptPreview.innerHTML = '<p>Transcript will appear here...</p><p style="margin-top: 10px; font-size: 12px;">You can copy or download the full transcript to use with Claude or other AI tools.</p>';
@@ -629,9 +640,10 @@
                     isFinal: true,
                     timestamp: new Date().toISOString()
                 }];
-
-                updateTranscriptPreview();
             }
+
+            // Update preview for both finals and partials
+            updateTranscriptPreview();
 
             // Auto-scroll
             transcriptBox.scrollTop = transcriptBox.scrollHeight;
@@ -812,9 +824,20 @@
 
         // Copy transcript button
         copyTranscriptBtn.addEventListener('click', async () => {
-            const fullText = fullTranscript
-                .filter(item => item.isFinal)
-                .map(item => item.text)
+            // Extract text from all transcript entries (both final and partial)
+            const entries = transcriptBox.querySelectorAll('.transcript-entry');
+
+            if (entries.length === 0) {
+                alert('No transcript available yet. Start recording first!');
+                return;
+            }
+
+            // Get all final entries, or if none exist, get the last partial
+            const finalEntries = Array.from(entries).filter(e => e.classList.contains('final'));
+            const entriesToCopy = finalEntries.length > 0 ? finalEntries : [entries[entries.length - 1]];
+
+            const fullText = entriesToCopy
+                .map(entry => entry.querySelector('.transcript-text').textContent)
                 .join('\n\n');
 
             if (!fullText.trim()) {
