@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.1</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.2</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -568,32 +568,38 @@
 
             /**
              * SPC: Commit stable prefix if criteria met
+             * Uses lastPartialTokens to track previous frame for LCP comparison
              */
             commitStablePrefix(currentTokens) {
                 const now = Date.now();
 
+                // First partial: initialize and return
                 if (this.workingRemainder.length === 0) {
                     this.workingRemainder = currentTokens.slice();
+                    this.lastPartialTokens = currentTokens.slice();
                     this.stabilityCounters = new Array(currentTokens.length).fill(0);
                     this.stabilityTimestamp = now;
+                    console.log('[SPC] Initialized with', currentTokens.length, 'tokens');
                     return;
                 }
 
-                // Compute LCP between working remainder and current
-                const lcp = this.computeLCP(this.workingRemainder, currentTokens);
+                // Compute LCP between LAST partial and CURRENT partial (not working remainder!)
+                const lcp = this.computeLCP(this.lastPartialTokens, currentTokens);
+                console.log('[SPC] LCP=', lcp, 'of', this.lastPartialTokens.length, 'tokens');
 
-                // Update stability counters
-                for (let i = 0; i < this.stabilityCounters.length; i++) {
-                    if (i < lcp) {
-                        this.stabilityCounters[i]++;
-                    } else {
-                        this.stabilityCounters[i] = 0;
-                    }
+                // Update stability counters for matching prefix
+                const limit = Math.min(lcp, this.workingRemainder.length);
+                for (let i = 0; i < limit; i++) {
+                    this.stabilityCounters[i]++;
+                }
+                // Reset counters beyond the stable prefix
+                for (let i = limit; i < this.stabilityCounters.length; i++) {
+                    this.stabilityCounters[i] = 0;
                 }
 
                 // Check if prefix meets stability criteria
                 let commitLength = 0;
-                for (let i = 0; i < lcp; i++) {
+                for (let i = 0; i < limit; i++) {
                     const stableByFrames = this.stabilityCounters[i] >= this.K;
                     const stableByTime = (now - this.stabilityTimestamp) >= this.T_ms;
 
@@ -604,23 +610,31 @@
                     }
                 }
 
-                // Commit stable prefix
-                if (commitLength > 0 && commitLength <= lcp) {
+                console.log('[SPC] Counters:', this.stabilityCounters.slice(0, 5), 'commitLength=', commitLength);
+
+                // Commit stable prefix and REMOVE from working remainder
+                if (commitLength > 0) {
                     const toCommit = this.workingRemainder.slice(0, commitLength).join(' ');
                     this.accumulatedText += (this.accumulatedText ? ' ' : '') + toCommit;
-                    console.log('[SPC] Committed stable prefix:', toCommit.substring(0, 50) + '...');
+                    console.log('[SPC] ✅ Committed:', toCommit.substring(0, 50) + '...');
+
+                    // CRITICAL: Shrink working remainder and counters
+                    this.workingRemainder = this.workingRemainder.slice(commitLength);
+                    this.stabilityCounters = this.stabilityCounters.slice(commitLength);
                     this.stabilityTimestamp = now;
                 }
 
-                // Replace working remainder with current tokens (partials refine, not append!)
+                // Update last partial snapshot for next frame's comparison
+                this.lastPartialTokens = currentTokens.slice();
+
+                // Update working remainder to current tokens (show latest wording in UI)
                 this.workingRemainder = currentTokens.slice();
 
-                // Adjust stability counters: keep first lcp counters, reset rest
-                const newCounters = new Array(currentTokens.length).fill(0);
-                for (let i = 0; i < Math.min(lcp, this.stabilityCounters.length, currentTokens.length); i++) {
-                    newCounters[i] = this.stabilityCounters[i];
+                // Ensure counters array matches new length
+                const deficit = this.workingRemainder.length - this.stabilityCounters.length;
+                if (deficit > 0) {
+                    this.stabilityCounters.push(...new Array(deficit).fill(0));
                 }
-                this.stabilityCounters = newCounters;
             }
 
             /**
@@ -653,9 +667,11 @@
                     this.lastPartialTokens.length >= this.beta
                 );
 
+                console.log(`[EW] Checked: LCP=${lcpRatio.toFixed(2)}, SP=${spOverlap}, isSlide=${isSlide}`);
+
                 if (isSlide) {
                     this.slideCounter++;
-                    console.log(`[EW] Slide detected (${this.slideCounter}/${this.H}): LCP=${lcpRatio.toFixed(2)}, SP=${spOverlap}`);
+                    console.log(`[EW] ⚠️  Slide detected (${this.slideCounter}/${this.H})`);
 
                     // Hysteresis: require H consecutive slides
                     if (this.slideCounter >= this.H) {
@@ -663,7 +679,7 @@
                         if (this.workingRemainder.length > 0) {
                             const rescued = this.workingRemainder.join(' ');
                             this.accumulatedText += (this.accumulatedText ? ' ' : '') + rescued;
-                            console.log('[EW] RESCUED uncommitted text:', rescued.substring(0, 50) + '...');
+                            console.log('[EW] 🚨 RESCUED uncommitted text:', rescued.substring(0, 50) + '...');
 
                             // Reset state
                             this.workingRemainder = currentTokens.slice();
@@ -675,6 +691,9 @@
                     }
                 } else {
                     // Not a slide, reset counter
+                    if (this.slideCounter > 0) {
+                        console.log(`[EW] Reset counter (was ${this.slideCounter})`);
+                    }
                     this.slideCounter = 0;
                 }
 
