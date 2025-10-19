@@ -120,8 +120,8 @@ log_info "Step 4/4: Verifying deployment..."
 
 EDGE_IP=$(curl -s ifconfig.me 2>/dev/null || curl -s icanhazip.com 2>/dev/null)
 
-# Test health endpoint
-if curl -k --max-time 5 "https://$EDGE_IP/healthz" 2>/dev/null | grep -q "OK"; then
+# Test health endpoint (using localhost since we're on the edge box)
+if curl -k --max-time 5 "https://localhost/healthz" 2>/dev/null | grep -q "OK"; then
     log_success "✓ Health endpoint responding"
 else
     log_error "✗ Health endpoint not responding"
@@ -129,7 +129,7 @@ else
 fi
 
 # Test main page
-if curl -k --max-time 5 "https://$EDGE_IP/" 2>/dev/null | grep -q "WhisperLive"; then
+if curl -k --max-time 5 "https://localhost/" 2>/dev/null | grep -q "WhisperLive"; then
     log_success "✓ Main page deployed"
 else
     log_warn "⚠ Main page may not be fully deployed"
