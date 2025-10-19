@@ -35,7 +35,7 @@ SCRIPTS IN THIS SERIES:
     - Create systemd service for auto-start
     - Test WhisperLive is responding
 
-  315-test-whisperlive-connection.sh
+  325-test-whisperlive-connection.sh
     Test end-to-end WhisperLive connectivity
     - Test GPU WhisperLive locally (localhost:9090)
     - Test Edge→GPU connection
