@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+.env-http
+!.env-http.example
+authorized_clients.txt
+!authorized_clients.txt.example
 *.pem
 *.key
 !server.key

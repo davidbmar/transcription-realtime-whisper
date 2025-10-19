@@ -1,0 +1,10 @@
+# Authorized Clients for Edge Box Access
+# Format: IP_ADDRESS LABEL
+# Copy this file to authorized_clients.txt and add your client IPs
+# cp authorized_clients.txt.example authorized_clients.txt
+#
+# DO NOT edit manually - use script 031-configure-edge-box-security.sh
+
+# Example entries (replace with your actual IPs):
+# 1.2.3.4 my-laptop
+# 5.6.7.8 office-desktop
