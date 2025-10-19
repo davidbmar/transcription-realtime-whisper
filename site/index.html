@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.0.1</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.1.0</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -660,7 +660,7 @@
                         task: 'transcribe',
                         language: languageInput.value,
                         model: 'Systran/faster-whisper-small.en',  // Fixed to small.en (only model that fits in T4 GPU)
-                        use_vad: false
+                        use_vad: true  // Enable VAD to detect speech boundaries
                     };
                     console.log('Sending config:', config);
                     ws.send(JSON.stringify(config));
@@ -705,6 +705,9 @@
                     try {
                         const data = JSON.parse(event.data);
 
+                        // DEBUG: Log what we receive
+                        console.log('WhisperLive message:', data);
+
                         // WhisperLive sends segments array
                         if (data.segments && data.segments.length > 0) {
                             // Concatenate all segment texts
@@ -713,6 +716,8 @@
                             // Check if last segment is final
                             const lastSegment = data.segments[data.segments.length - 1];
                             const isFinal = lastSegment.completed === true;
+
+                            console.log('Segment:', {fullText: fullText.substring(0, 50), isFinal, completed: lastSegment.completed});
 
                             if (fullText.trim()) {
                                 addTranscript(fullText, isFinal);
