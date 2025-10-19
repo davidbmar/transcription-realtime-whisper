@@ -158,7 +158,12 @@ pip install --upgrade pip setuptools wheel
 pip install -e .
 pip install faster-whisper
 
-echo "✅ WhisperLive installed"
+# Install cuDNN for GPU inference (required for faster-whisper on CUDA)
+# This provides libcudnn_ops.so.* libraries needed by faster-whisper
+echo "Installing cuDNN for GPU inference..."
+pip install nvidia-cudnn-cu11
+
+echo "✅ WhisperLive and dependencies installed"
 echo ""
 
 # Step 6: Download Whisper model
