@@ -54,11 +54,17 @@ if [ -n "${GPU_INSTANCE_IP:-}" ] && [ "$(hostname -I | awk '{print $1}')" != "$G
     log_info "GPU IP: $GPU_INSTANCE_IP"
 
     if [ -z "${SSH_KEY:-}" ]; then
-        SSH_KEY="$HOME/.ssh/dbm-sep23-2025.pem"
+        if [ -n "${SSH_KEY_NAME:-}" ]; then
+            SSH_KEY="$HOME/.ssh/${SSH_KEY_NAME}.pem"
+        else
+            log_error "SSH_KEY_NAME not set in .env"
+            exit 1
+        fi
     fi
 
     if [ ! -f "$SSH_KEY" ]; then
         log_error "SSH key not found: $SSH_KEY"
+        log_error "Expected: $HOME/.ssh/${SSH_KEY_NAME}.pem"
         exit 1
     fi
 else
