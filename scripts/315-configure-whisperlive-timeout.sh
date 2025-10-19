@@ -70,27 +70,70 @@ source "$(dirname "$0")/riva-common-functions.sh"
 load_environment
 
 # Configuration
-TIMEOUT_SECONDS="${1:-3600}"  # Default: 1 hour (3600 seconds)
 SERVICE_NAME="whisperlive"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
 # Construct SSH key path from .env SSH_KEY_NAME
 SSH_KEY="$HOME/.ssh/${SSH_KEY_NAME}.pem"
 
+# If no parameter provided, show interactive prompt
+if [ -z "${1:-}" ]; then
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║                                                            ║"
+    echo "║        WhisperLive Connection Timeout Configuration        ║"
+    echo "║                                                            ║"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "WhisperLive automatically disconnects clients after a specified"
+    echo "timeout to manage GPU resources. Choose a timeout duration:"
+    echo ""
+    echo "Common timeout values:"
+    echo "  1) 10 minutes  (600 seconds)   - Quick demos"
+    echo "  2) 30 minutes  (1800 seconds)  - Default, recommended ✓"
+    echo "  3) 1 hour      (3600 seconds)  - Long recordings"
+    echo "  4) 2 hours     (7200 seconds)  - Extended sessions"
+    echo "  5) Custom value (enter seconds)"
+    echo ""
+    read -p "Select timeout option (1-5) [2]: " choice
+    choice=${choice:-2}
+
+    case $choice in
+        1) TIMEOUT_SECONDS=600 ;;
+        2) TIMEOUT_SECONDS=1800 ;;
+        3) TIMEOUT_SECONDS=3600 ;;
+        4) TIMEOUT_SECONDS=7200 ;;
+        5)
+            read -p "Enter custom timeout in seconds: " TIMEOUT_SECONDS
+            if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+                echo "❌ Invalid timeout value: $TIMEOUT_SECONDS"
+                exit 1
+            fi
+            ;;
+        *)
+            echo "❌ Invalid choice. Using default: 1800 seconds (30 minutes)"
+            TIMEOUT_SECONDS=1800
+            ;;
+    esac
+else
+    # Parameter provided via command line
+    TIMEOUT_SECONDS="$1"
+
+    # Validate input
+    if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
+        log_error "❌ Invalid timeout value: $TIMEOUT_SECONDS"
+        echo "Usage: $0 [timeout_in_seconds]"
+        echo ""
+        echo "Examples:"
+        echo "  $0 1800   # 30 minutes (default)"
+        echo "  $0 3600   # 1 hour"
+        echo "  $0 7200   # 2 hours"
+        exit 1
+    fi
+fi
+
+echo ""
 log_info "🔧 Configuring WhisperLive Connection Timeout"
 echo ""
-
-# Validate input
-if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]]; then
-    log_error "❌ Invalid timeout value: $TIMEOUT_SECONDS"
-    echo "Usage: $0 [timeout_in_seconds]"
-    echo ""
-    echo "Examples:"
-    echo "  $0 1800   # 30 minutes"
-    echo "  $0 3600   # 1 hour (recommended)"
-    echo "  $0 7200   # 2 hours"
-    exit 1
-fi
 
 # Convert to human-readable
 HOURS=$((TIMEOUT_SECONDS / 3600))
