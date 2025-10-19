@@ -1,6 +1,7 @@
 # Environment and secrets
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 !server.key
@@ -22,7 +23,8 @@ ENV/
 
 # Logs
 *.log
-logs/
+logs/*
+!logs/.gitkeep
 
 # IDE
 .vscode/
