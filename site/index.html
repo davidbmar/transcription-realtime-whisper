@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.2.0</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.3.0</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -489,6 +489,8 @@
         let sessionId = null;
         let fullTranscript = [];  // Array of {text, isFinal, timestamp}
         let seenFinalTexts = new Set();  // Track unique final transcripts
+        let accumulatedText = '';  // Accumulated complete transcript
+        let lastPartialText = '';  // Track last partial to detect new text
 
         function generateSessionId() {
             // Generate a short, readable session ID (8 chars)
@@ -560,22 +562,12 @@
         let lastDisplayedText = '';  // Track last displayed text to avoid duplicates
 
         function updateTranscriptPreview() {
-            // Update the AI panel preview with visible transcript
-            const entries = transcriptBox.querySelectorAll('.transcript-entry');
+            // Show accumulated text + current partial
+            let previewText = accumulatedText;
 
-            if (entries.length === 0) {
-                transcriptPreview.classList.add('empty');
-                transcriptPreview.innerHTML = '<p>Transcript will appear here...</p><p style="margin-top: 10px; font-size: 12px;">You can copy or download the full transcript to use with Claude or other AI tools.</p>';
-                return;
+            if (lastPartialText && lastPartialText !== accumulatedText) {
+                previewText += (previewText ? ' ' : '') + lastPartialText;
             }
-
-            // Get all finals, or if none, get the last partial
-            const finalEntries = Array.from(entries).filter(e => e.classList.contains('final'));
-            const entriesToShow = finalEntries.length > 0 ? finalEntries : [entries[entries.length - 1]];
-
-            const previewText = entriesToShow
-                .map(entry => entry.querySelector('.transcript-text').textContent)
-                .join('\n\n');
 
             if (previewText.trim()) {
                 transcriptPreview.classList.remove('empty');
@@ -593,12 +585,24 @@
             // Normalize text for comparison (trim whitespace)
             const normalizedText = text.trim();
 
-            // Deduplicate: ignore if we've seen this exact final text before
+            // Accumulate text to prevent loss from sliding window
             if (isFinal) {
+                // Final segment - save to accumulated
                 if (seenFinalTexts.has(normalizedText)) {
                     console.log('Skipping duplicate final:', normalizedText.substring(0, 50) + '...');
                     return;
                 }
+                seenFinalTexts.add(normalizedText);
+                accumulatedText += (accumulatedText ? ' ' : '') + normalizedText;
+                lastPartialText = '';  // Reset partial tracking
+            } else {
+                // Partial segment - check if window slid
+                if (lastPartialText && !normalizedText.includes(lastPartialText.substring(0, 50))) {
+                    // Window slid! Save the old partial before it's lost
+                    console.log('Window slid - saving previous partial');
+                    accumulatedText += (accumulatedText ? ' ' : '') + lastPartialText;
+                }
+                lastPartialText = normalizedText;
             }
 
             const entry = document.createElement('div');
@@ -651,10 +655,12 @@
 
         async function startRecording() {
             try {
-                // Reset deduplication tracking for new session
+                // Reset all tracking for new session
                 lastDisplayedText = '';
                 seenFinalTexts.clear();
                 fullTranscript = [];
+                accumulatedText = '';
+                lastPartialText = '';
 
                 setStatus('connecting', 'Connecting to server...');
 
@@ -824,21 +830,12 @@
 
         // Copy transcript button
         copyTranscriptBtn.addEventListener('click', async () => {
-            // Extract text from all transcript entries (both final and partial)
-            const entries = transcriptBox.querySelectorAll('.transcript-entry');
+            // Use accumulated text + current partial
+            let fullText = accumulatedText;
 
-            if (entries.length === 0) {
-                alert('No transcript available yet. Start recording first!');
-                return;
+            if (lastPartialText && lastPartialText !== accumulatedText) {
+                fullText += (fullText ? ' ' : '') + lastPartialText;
             }
-
-            // Get all final entries, or if none exist, get the last partial
-            const finalEntries = Array.from(entries).filter(e => e.classList.contains('final'));
-            const entriesToCopy = finalEntries.length > 0 ? finalEntries : [entries[entries.length - 1]];
-
-            const fullText = entriesToCopy
-                .map(entry => entry.querySelector('.transcript-text').textContent)
-                .join('\n\n');
 
             if (!fullText.trim()) {
                 alert('No transcript available yet. Start recording first!');
