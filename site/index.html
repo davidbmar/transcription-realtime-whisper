@@ -616,14 +616,18 @@
                 transcriptBox.appendChild(entry);
             }
 
-            // Track in fullTranscript array for export (only unique finals)
+            // Track in fullTranscript array for export
+            // WhisperLive sends CUMULATIVE finals, so replace (don't append)
             if (isFinal) {
                 seenFinalTexts.add(normalizedText);
-                fullTranscript.push({
+
+                // Replace fullTranscript with just the latest cumulative text
+                fullTranscript = [{
                     text: text,
                     isFinal: true,
                     timestamp: new Date().toISOString()
-                });
+                }];
+
                 updateTranscriptPreview();
             }
 
