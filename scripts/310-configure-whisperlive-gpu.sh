@@ -95,21 +95,22 @@ sudo rm -f /etc/apt/sources.list.d/nvidia-*.list 2>/dev/null || true
 
 sudo apt-get update
 
-# Install Python 3.11 (WhisperLive requires numpy 1.26.4 which needs Python 3.9+)
-echo "Installing Python 3.11 from deadsnakes PPA..."
+# Install Python 3.9 (WhisperLive requires numpy 1.26.4 which needs Python 3.9+)
+# Python 3.9 is the most stable version available in deadsnakes PPA for Ubuntu 20.04
+echo "Installing Python 3.9 from deadsnakes PPA..."
 sudo apt-get install -y software-properties-common
 sudo add-apt-repository -y ppa:deadsnakes/ppa
 sudo apt-get update
 sudo apt-get install -y \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
+    python3.9 \
+    python3.9-venv \
+    python3.9-dev \
     git \
     ffmpeg \
     portaudio19-dev
 
 echo "✅ System dependencies installed"
-echo "✅ Python 3.11 installed (required for WhisperLive)"
+echo "✅ Python 3.9 installed (required for WhisperLive)"
 echo ""
 
 # Step 2: Create WhisperLive directory
@@ -136,16 +137,16 @@ echo "✅ WhisperLive repository ready"
 echo ""
 
 # Step 4: Create Python virtual environment
-echo "[4/7] Creating Python virtual environment with Python 3.11..."
+echo "[4/7] Creating Python virtual environment with Python 3.9..."
 if [ -d "venv" ]; then
     echo "Virtual environment exists, recreating..."
     rm -rf venv
 fi
 
-python3.11 -m venv venv
+python3.9 -m venv venv
 source venv/bin/activate
 
-echo "✅ Virtual environment created with Python 3.11"
+echo "✅ Virtual environment created with Python 3.9"
 python --version
 echo ""
 
