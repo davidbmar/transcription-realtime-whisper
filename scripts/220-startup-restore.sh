@@ -127,13 +127,32 @@ if [ "$CURRENT_IP" != "$OLD_IP" ]; then
   # Update .env
   sed -i "s/^GPU_INSTANCE_IP=.*/GPU_INSTANCE_IP=$CURRENT_IP/" .env
   sed -i "s/^RIVA_HOST=.*/RIVA_HOST=$CURRENT_IP/" .env
+
+  # Also update GPU_HOST in main .env if it exists
+  if grep -q "^GPU_HOST=" .env 2>/dev/null; then
+    sed -i "s/^GPU_HOST=.*/GPU_HOST=$CURRENT_IP/" .env
+  fi
   log_success "  ✅ .env updated"
 
-  # Update .env-http (for WhisperLive edge proxy)
-  if [ -f .env-http ]; then
-    sed -i "s/^DOMAIN=.*/DOMAIN=$CURRENT_IP/" .env-http
-    sed -i "s/^GPU_HOST=.*/GPU_HOST=$CURRENT_IP/" .env-http
-    log_success "  ✅ .env-http updated"
+  # Update .env-http (for WhisperLive edge proxy) - check multiple locations
+  EDGE_ENV_HTTP_LOCATIONS=(
+    "$HOME/event-b/whisper-live-test/.env-http"
+    "$HOME/event-b/whisper-live-edge/.env-http"
+    ".env-http"
+  )
+
+  ENV_HTTP_UPDATED=false
+  for env_http_path in "${EDGE_ENV_HTTP_LOCATIONS[@]}"; do
+    if [ -f "$env_http_path" ]; then
+      sed -i "s/^DOMAIN=.*/DOMAIN=$CURRENT_IP/" "$env_http_path"
+      sed -i "s/^GPU_HOST=.*/GPU_HOST=$CURRENT_IP/" "$env_http_path"
+      log_success "  ✅ .env-http updated: $env_http_path"
+      ENV_HTTP_UPDATED=true
+    fi
+  done
+
+  if [ "$ENV_HTTP_UPDATED" = "false" ]; then
+    log_info "  ℹ️  No .env-http found (edge proxy not configured)"
   fi
 
   log_success "✅ All configuration files updated"

@@ -50,13 +50,27 @@ elif [ -f "$PROJECT_ROOT/.env" ]; then
     set +a
 fi
 
-if [ -z "${GPU_HOST:-}" ] || [ -z "${GPU_PORT:-}" ]; then
-    log_error "GPU_HOST and GPU_PORT must be set in .env or .env-http"
+# Support both WhisperLive (GPU_HOST) and RIVA (RIVA_HOST/GPU_INSTANCE_IP) variables
+GPU_HOST="${GPU_HOST:-${RIVA_HOST:-${GPU_INSTANCE_IP:-}}}"
+GPU_PORT="${GPU_PORT:-9090}"
+
+if [ -z "$GPU_HOST" ]; then
+    log_error "GPU endpoint not configured"
+    echo ""
+    echo "Please set one of the following in .env:"
+    echo "  - GPU_HOST=<gpu-ip>  (for WhisperLive)"
+    echo "  - RIVA_HOST=<gpu-ip>  (for RIVA, will be used as fallback)"
+    echo "  - GPU_INSTANCE_IP=<gpu-ip>  (legacy, will be used as fallback)"
+    echo ""
+    echo "Example:"
+    echo "  echo 'GPU_HOST=52.15.199.98' >> .env"
+    echo "  echo 'GPU_PORT=9090' >> .env"
     exit 1
 fi
 
 log_success "Configuration loaded"
 log_info "GPU endpoint: $GPU_HOST:$GPU_PORT"
+log_info "Using: ${RIVA_HOST:+RIVA_HOST}${GPU_HOST:+GPU_HOST}${GPU_INSTANCE_IP:+GPU_INSTANCE_IP}"
 echo ""
 
 # ============================================================================
