@@ -116,7 +116,7 @@ async def test_connection():
 
             # Send config
             config = {
-                "uid": "test-325",
+                "uid": "test-edge-to-gpu-connection",
                 "task": "transcribe",
                 "language": "en",
                 "model": "Systran/faster-whisper-small.en",
@@ -215,7 +215,7 @@ async def test_transcription():
         async with websockets.connect(uri, ping_timeout=10) as ws:
             # Send config
             config = {
-                "uid": "test-audio-325",
+                "uid": "test-edge-to-gpu-audio-transcription",
                 "task": "transcribe",
                 "language": "en",
                 "model": "Systran/faster-whisper-small.en",
