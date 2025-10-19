@@ -486,6 +486,7 @@
         // ============================================================
         let sessionId = null;
         let fullTranscript = [];  // Array of {text, isFinal, timestamp}
+        let seenFinalTexts = new Set();  // Track unique final transcripts
 
         function generateSessionId() {
             // Generate a short, readable session ID (8 chars)
@@ -576,10 +577,15 @@
         }
 
         function addTranscript(text, isFinal = false) {
-            // Deduplicate: ignore if this exact text was just displayed
-            if (isFinal && text === lastDisplayedText) {
-                console.log('Skipping duplicate final:', text.substring(0, 50) + '...');
-                return;
+            // Normalize text for comparison (trim whitespace)
+            const normalizedText = text.trim();
+
+            // Deduplicate: ignore if we've seen this exact final text before
+            if (isFinal) {
+                if (seenFinalTexts.has(normalizedText)) {
+                    console.log('Skipping duplicate final:', normalizedText.substring(0, 50) + '...');
+                    return;
+                }
             }
 
             const entry = document.createElement('div');
@@ -610,9 +616,9 @@
                 transcriptBox.appendChild(entry);
             }
 
-            // Track in fullTranscript array for export
+            // Track in fullTranscript array for export (only unique finals)
             if (isFinal) {
-                lastDisplayedText = text;
+                seenFinalTexts.add(normalizedText);
                 fullTranscript.push({
                     text: text,
                     isFinal: true,
@@ -629,6 +635,8 @@
             try {
                 // Reset deduplication tracking for new session
                 lastDisplayedText = '';
+                seenFinalTexts.clear();
+                fullTranscript = [];
 
                 setStatus('connecting', 'Connecting to server...');
 
