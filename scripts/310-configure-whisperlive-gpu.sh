@@ -88,6 +88,11 @@ echo ""
 
 # Step 1: Install system dependencies
 echo "[1/7] Installing system dependencies..."
+
+# Remove broken NVIDIA repositories (common on older GPU instances)
+echo "Cleaning up any broken NVIDIA repositories..."
+sudo rm -f /etc/apt/sources.list.d/nvidia-*.list 2>/dev/null || true
+
 sudo apt-get update
 sudo apt-get install -y \
     python3 \
