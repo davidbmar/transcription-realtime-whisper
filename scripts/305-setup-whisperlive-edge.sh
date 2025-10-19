@@ -284,6 +284,37 @@ if systemctl is-active --quiet nginx 2>/dev/null; then
     fi
 fi
 
+# Check if container already exists
+if docker ps -a --format '{{.Names}}' | grep -q "^whisperlive-edge$"; then
+    echo ""
+    log_warn "⚠️  Container 'whisperlive-edge' already exists"
+    echo ""
+    echo "The container will be removed and recreated with current configuration."
+    echo "This preserves all config files and Docker volumes (SSL certs, cache)."
+    echo ""
+    read -p "Remove existing container and recreate? (y/n): " -n 1 -r
+    echo
+    echo ""
+
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Stopping and removing existing container..."
+        docker stop whisperlive-edge 2>/dev/null || true
+        docker rm whisperlive-edge 2>/dev/null || true
+        log_success "✅ Removed existing container"
+        echo ""
+    else
+        log_info "Exiting without changes."
+        echo ""
+        echo "To manage the existing container:"
+        echo "  • Restart: cd $EDGE_DIR && docker compose restart"
+        echo "  • Logs: cd $EDGE_DIR && docker compose logs -f"
+        echo "  • Stop: cd $EDGE_DIR && docker compose down"
+        echo "  • Remove: docker stop whisperlive-edge && docker rm whisperlive-edge"
+        echo ""
+        exit 0
+    fi
+fi
+
 # Start Caddy
 cd "$EDGE_DIR"
 docker compose up -d
