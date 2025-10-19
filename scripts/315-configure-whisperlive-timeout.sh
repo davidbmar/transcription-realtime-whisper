@@ -73,7 +73,9 @@ load_environment
 TIMEOUT_SECONDS="${1:-3600}"  # Default: 1 hour (3600 seconds)
 SERVICE_NAME="whisperlive"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/dbm-oct18-2025.pem}"
+
+# Construct SSH key path from .env SSH_KEY_NAME
+SSH_KEY="$HOME/.ssh/${SSH_KEY_NAME}.pem"
 
 log_info "🔧 Configuring WhisperLive Connection Timeout"
 echo ""
