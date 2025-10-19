@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v3.0.0</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v3.0.2</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -668,8 +668,8 @@
                     if (this.cfg.debug) console.log(`[BoF] Flushed remaining working remainder.`);
                 }
 
-                const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
-                if (desiredHard > this.hardCommitted) this.hardCommitted = desiredHard;
+                // Protect finals from rewind - make them immediately hard-committed
+                this.hardCommitted = this.accTokens.length;
             }
 
             getTranscript() { return this.accText.trim(); }
@@ -841,10 +841,8 @@
                     }
                 }
 
-                // No overlap found inside tail → rollback full tail
-                this.accTokens = this.accTokens.slice(0, editableStart);
-                this.accText = this._detok(this.accTokens);
-                if (this.cfg.debug) console.log(`[REWIND] tokensRolledBack=${editableLen} (full soft tail)`);
+                // No overlap found → genuine window slide or new utterance, don't rewind
+                if (this.cfg.debug) console.log(`[ALIGN] No overlap - treating as new text after window slide`);
             }
         }
 
@@ -1089,7 +1087,18 @@
                             const lastSegment = data.segments[data.segments.length - 1];
                             const isFinal = lastSegment.completed === true;
 
-                            console.log('Segment:', {fullText: fullText.substring(0, 50), isFinal, completed: lastSegment.completed});
+                            // VERBOSE LOGGING for debugging
+                            console.log('📊 Segment Details:', {
+                                segmentCount: data.segments.length,
+                                fullText: fullText.substring(0, 80),
+                                isFinal: isFinal,
+                                lastSegment: {
+                                    text: lastSegment.text?.substring(0, 50),
+                                    completed: lastSegment.completed,
+                                    type: typeof lastSegment.completed
+                                },
+                                allCompletedFlags: data.segments.map(s => s.completed)
+                            });
 
                             if (fullText.trim()) {
                                 addTranscript(fullText, isFinal);
