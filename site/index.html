@@ -321,7 +321,15 @@
             statusText.textContent = message;
         }
 
+        let lastDisplayedText = '';  // Track last displayed text to avoid duplicates
+
         function addTranscript(text, isFinal = false) {
+            // Deduplicate: ignore if this exact text was just displayed
+            if (isFinal && text === lastDisplayedText) {
+                console.log('Skipping duplicate final:', text.substring(0, 50) + '...');
+                return;
+            }
+
             const entry = document.createElement('div');
             entry.className = `transcript-entry ${isFinal ? 'final' : 'partial'}`;
 
@@ -350,12 +358,20 @@
                 transcriptBox.appendChild(entry);
             }
 
+            // Track last displayed final text
+            if (isFinal) {
+                lastDisplayedText = text;
+            }
+
             // Auto-scroll
             transcriptBox.scrollTop = transcriptBox.scrollHeight;
         }
 
         async function startRecording() {
             try {
+                // Reset deduplication tracking for new session
+                lastDisplayedText = '';
+
                 setStatus('connecting', 'Connecting to server...');
 
                 // Build WebSocket URL (wss:// on same host)
