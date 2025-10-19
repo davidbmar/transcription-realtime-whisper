@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.5.0</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v3.0.0</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -487,347 +487,364 @@
         // TRANSCRIPT ACCUMULATOR (SPC + EW + BoF)
         // ============================================================
         /**
-         * TranscriptAccumulator - Robust partial transcript accumulation
+         * WhisperLive Transcript Accumulator v3.0 - SPC + EW + BoF + Soft Tail Rewind
          *
-         * Solves WhisperLive's sliding window data loss problem using:
-         * 1. SPC (Stability-Prefix Commit): Proactively commit stable prefixes
-         * 2. EW (Eviction Watchdog): Rescue text when window slides
-         * 3. BoF (Backfill-on-Final): Merge finals without dupes
+         * Implements hard commit + soft tail architecture to handle:
+         * - Window slides (WhisperLive's buffer wraps)
+         * - Upstream refinements (changes to recently-committed text)
+         * - Cumulative partials within windows
          *
-         * Problem: WhisperLive's sliding window drops old audio/text when buffer fills.
-         * In fast continuous speech, text can be lost before being marked as final.
+         * Architecture:
+         * - accTokens[0..hardCommitted): IMMUTABLE committed text
+         * - accTokens[hardCommitted..end): SOFT TAIL (R tokens, can be rolled back)
+         * - workingTokens: Current uncommitted remainder
          *
-         * Solution: Don't wait for finals or slide detection. Commit stable prefixes
-         * immediately, and use slide detection as a safety net.
+         * Usage:
+         *   const acc = new TranscriptAccumulator({ softTailTokens: 12 });
+         *   // On each WS message:
+         *   for (const seg of msg.segments || []) {
+         *     if (seg.completed) acc.ingestFinal(seg.text);
+         *     else acc.ingestPartial(seg.text);
+         *   }
+         *   // Render:
+         *   const full = acc.getTranscript();                 // committed only
+         *   const withCurrent = acc.getTranscriptWithCurrent(); // include live remainder
          */
         class TranscriptAccumulator {
-            constructor(config = {}) {
-                // SPC: Stability-Prefix Commit parameters
-                this.K = config.stabilityFrames || 2;  // Frames for stability
-                this.Lmin = config.minPrefixLength || 3;  // Min tokens to commit
-                this.T_ms = config.stabilityTimeMs || 1000;  // Time-based stability
+            constructor(cfg = {}) {
+                // Map old config names to internal structure
+                this.cfg = {
+                    // SPC
+                    K: cfg.stabilityFrames ?? cfg.K ?? 2,
+                    Lmin: cfg.minPrefixLength ?? cfg.Lmin ?? 3,
+                    T_ms: cfg.stabilityTimeMs ?? cfg.T_ms ?? 1000,
+                    // EW
+                    W: cfg.overlapWindow ?? cfg.W ?? 8,
+                    eps: cfg.refineEpsilon ?? cfg.eps ?? 0.15,
+                    alpha: cfg.slideThreshold ?? cfg.alpha ?? 0.4,
+                    beta: cfg.minSlideLength ?? cfg.beta ?? 5,
+                    H: cfg.hysteresisFrames ?? cfg.H ?? 2,
+                    cooldownMs: cfg.cooldownMs ?? 250,
+                    // BoF
+                    finalAlignW: cfg.alignWindow ?? cfg.finalAlignW ?? 10,
+                    // Soft Tail
+                    softTailTokens: cfg.softTailTokens ?? 12, // editable tail (R)
+                    // De-dupe
+                    recentTailGuard: cfg.recentTailGuard ?? 35,
+                    // Logging
+                    debug: cfg.debug ?? true,
+                };
 
-                // EW: Eviction Watchdog parameters
-                this.W = config.overlapWindow || 8;  // Token window for comparison
-                this.alpha = config.slideThreshold || 0.4;  // LCP ratio threshold
-                this.beta = config.minSlideLength || 5;  // Min tokens to rescue
-                this.H = config.hysteresisFrames || 2;  // Consecutive frames for slide
-                this.cooldownMs = config.cooldownMs || 250;  // Cooldown after rescue
+                // Accumulated committed tokens (normalized) + text
+                this.accTokens = [];
+                this.accText = "";
+                this.hardCommitted = 0; // index into accTokens: [0..hardCommitted) immutable
 
-                // BoF: Backfill-on-Final parameters
-                this.alignWindow = config.alignWindow || 10;  // Alignment window
+                // Working remainder (current partial not yet fully committed)
+                this.workingTokens = [];
+                this.workingOrig = "";
 
-                // State
-                this.accumulatedText = '';  // Committed text
-                this.workingRemainder = [];  // Uncommitted tokens
-                this.lastPartialTokens = [];  // Previous partial tokens
-                this.stabilityCounters = [];  // Per-token stability counters
-                this.stabilityTimestamp = null;  // When current prefix became stable
-                this.slideCounter = 0;  // Consecutive slide frames
-                this.lastRescueTime = 0;  // Last rescue timestamp (cooldown)
-                this.seenFinals = new Set();  // De-dupe finals
-                this.totalCommittedTokens = 0;  // Total tokens committed from cumulative stream
+                // SPC state
+                this.lastPartialTokens = []; // snapshot of PRIOR partial (normalized)
+                this.stableCounts = [];
+                this.stableSince = [];
+
+                // EW state
+                this.slideStreak = 0;
+                this.lastSlideAt = 0;
             }
 
-            /**
-             * Tokenize text to words (normalized for comparison)
-             */
-            tokenize(text) {
-                return text
-                    .toLowerCase()
-                    .replace(/[^\w\s]/g, ' ')  // Remove punctuation
-                    .split(/\s+/)
-                    .filter(t => t.length > 0);
-            }
+            /* === Public API === */
 
-            /**
-             * Compute Longest Common Prefix in tokens
-             */
-            computeLCP(tokens1, tokens2) {
-                let k = 0;
-                const minLen = Math.min(tokens1.length, tokens2.length);
-                while (k < minLen && tokens1[k] === tokens2[k]) {
-                    k++;
+            ingestPartial(text) {
+                const now = Date.now();
+                const norm = this._normalize(text);
+                const curr = this._tokenize(norm);
+
+                // Bootstrap
+                if (this.workingTokens.length === 0) {
+                    this.workingTokens = curr.slice();
+                    this.workingOrig = text;
+                    this.lastPartialTokens = curr.slice();
+                    this._resetStability(curr.length, now);
+                    this._alignCurrWithTail(curr); // in case acc already has content
+                    return;
                 }
-                return k;
+
+                // 0) Soft-tail alignment/rewind if upstream refined within tail
+                this._alignCurrWithTail(curr);
+
+                // 1) SPC — commit stable left prefix from PRIOR → CURRENT
+                const lcp = this._lcp(this.lastPartialTokens, curr);
+                const limit = Math.min(lcp, this.workingTokens.length);
+
+                for (let i = 0; i < limit; i++) {
+                    this.stableCounts[i] += 1;
+                    if (this.stableCounts[i] === 1) this.stableSince[i] = now;
+                }
+                for (let i = limit; i < this.workingTokens.length; i++) {
+                    this.stableCounts[i] = 0;
+                    this.stableSince[i] = now;
+                }
+
+                const { K, Lmin, T_ms: Tms } = this.cfg;
+                let commitLen = 0;
+                for (let i = 0; i < limit; i++) {
+                    const byFrames = this.stableCounts[i] >= K;
+                    const byTime = (now - this.stableSince[i]) >= Tms;
+                    if ((byFrames || byTime) && i >= (Lmin - 1)) commitLen = i + 1;
+                    else break; // contiguous only
+                }
+
+                if (commitLen > 0) {
+                    const prefix = this.workingTokens.slice(0, commitLen);
+                    if (!this._recentTailDuplicate(prefix)) {
+                        const display = this._detok(prefix);
+                        this._appendToAccumulated(prefix, display);
+                        if (this.cfg.debug) console.log(`[SPC] committed: "${display}" (len=${prefix.length})`);
+                    }
+                    // shrink working remainder
+                    this.workingTokens = this.workingTokens.slice(commitLen);
+                    this.workingOrig = this._detok(this.workingTokens);
+                    this.stableCounts = this.stableCounts.slice(commitLen);
+                    this.stableSince = this.stableSince.slice(commitLen);
+
+                    // Advance hard-commit pointer so only R tokens remain editable
+                    const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
+                    if (desiredHard > this.hardCommitted) this.hardCommitted = desiredHard;
+
+                    if (this.cfg.debug) {
+                        console.log(`[SPC] hardCommitted=${this.hardCommitted}, tailSize=${this.accTokens.length - this.hardCommitted}`);
+                    }
+                }
+
+                // 2) EW — detect true slide and rescue remainder
+                const slide = this._detectSlide(this.lastPartialTokens, curr, now);
+                if (slide && this.workingTokens.length >= this.cfg.beta) {
+                    if (!this._recentTailDuplicate(this.workingTokens)) {
+                        const disp = this._detok(this.workingTokens);
+                        this._appendToAccumulated(this.workingTokens, disp);
+                        if (this.cfg.debug) console.log(`[EW] RESCUED remainder: "${disp}" (len=${this.workingTokens.length})`);
+                    }
+                    // reset working to curr
+                    this.workingTokens = curr.slice();
+                    this.workingOrig = text;
+                    this._resetStability(this.workingTokens.length, now);
+
+                    const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
+                    if (desiredHard > this.hardCommitted) this.hardCommitted = desiredHard;
+
+                    this.lastPartialTokens = curr.slice();
+                    return;
+                }
+
+                // 3) refinement path: mirror curr
+                this.workingTokens = curr.slice();
+                this.workingOrig = text;
+                this._ensureStabilityLength(this.workingTokens.length, now);
+                this.lastPartialTokens = curr.slice();
             }
 
-            /**
-             * Compute suffix-prefix overlap
-             */
-            computeSPOverlap(tokens1, tokens2) {
-                const maxK = Math.min(this.W, tokens1.length, tokens2.length);
-                for (let k = maxK; k >= 1; k--) {
-                    const suffix = tokens1.slice(-k).join(' ');
-                    const prefix = tokens2.slice(0, k).join(' ');
-                    if (suffix === prefix) {
-                        return k;
+            ingestFinal(text) {
+                const finalTok = this._tokenize(this._normalize(text));
+                const drop = this._maxPrefixOverlapWithTail(finalTok, this.accTokens, this.cfg.finalAlignW);
+                const remainder = finalTok.slice(drop);
+                if (remainder.length === 0) {
+                    if (this.cfg.debug) console.log(`[BoF] Skipping duplicate final.`);
+                    return;
+                }
+                if (!this._recentTailDuplicate(remainder)) {
+                    const disp = this._detok(remainder);
+                    this._appendToAccumulated(remainder, disp);
+                    if (this.cfg.debug) console.log(`[BoF] Added final: "${disp}"`);
+                }
+
+                // Clear working if final covers it substantially
+                const back = this._overlapSuffixPrefix(this.workingTokens, finalTok, this.cfg.W);
+                if (back >= Math.min(this.workingTokens.length, Math.floor(this.cfg.W * 0.8))) {
+                    this.workingTokens = [];
+                    this.workingOrig = "";
+                    this._resetStability(0, Date.now());
+                    if (this.cfg.debug) console.log(`[BoF] Flushed remaining working remainder.`);
+                }
+
+                const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
+                if (desiredHard > this.hardCommitted) this.hardCommitted = desiredHard;
+            }
+
+            getTranscript() { return this.accText.trim(); }
+
+            getTranscriptWithCurrent() {
+                const base = this.accText.trim();
+                const curr = this.workingOrig.trim();
+                return base ? (curr ? `${base} ${curr}` : base) : curr;
+            }
+
+            reset() {
+                this.accTokens = [];
+                this.accText = "";
+                this.hardCommitted = 0;
+                this.workingTokens = [];
+                this.workingOrig = "";
+                this.lastPartialTokens = [];
+                this.stableCounts = [];
+                this.stableSince = [];
+                this.slideStreak = 0;
+                this.lastSlideAt = 0;
+                console.log('[Accumulator] Reset for new session');
+            }
+
+            /* === Backwards Compatibility Aliases === */
+            getPreviewText() { return this.getTranscriptWithCurrent(); }
+            getFullText() { return this.getTranscript(); }
+
+            /* === Internals === */
+
+            _normalize(s) {
+                return String(s)
+                    .toLowerCase()
+                    .replace(/[""]/g, '"')
+                    .replace(/['']/g, "'")
+                    .replace(/[^\p{L}\p{N}\s'".,!?-]+/gu, " ")
+                    .replace(/\s+/g, " ")
+                    .trim();
+            }
+
+            _tokenize(norm) { return norm ? norm.split(" ") : []; }
+            _detok(toks) { return toks.join(" "); }
+
+            _resetStability(len, now) {
+                this.stableCounts = Array(len).fill(0);
+                this.stableSince = Array(len).fill(now);
+            }
+
+            _ensureStabilityLength(len, now) {
+                const d = len - this.stableCounts.length;
+                if (d > 0) {
+                    this.stableCounts.push(...Array(d).fill(0));
+                    this.stableSince.push(...Array(d).fill(now));
+                }
+            }
+
+            _lcp(a, b) {
+                const n = Math.min(a.length, b.length);
+                let i = 0;
+                while (i < n && a[i] === b[i]) i++;
+                return i;
+            }
+
+            _overlapSuffixPrefix(a, b, W) {
+                const maxk = Math.min(W, a.length, b.length);
+                for (let k = maxk; k > 0; k--) {
+                    let ok = true;
+                    for (let i = 0; i < k; i++) {
+                        if (a[a.length - k + i] !== b[i]) { ok = false; break; }
                     }
+                    if (ok) return k;
                 }
                 return 0;
             }
 
-            /**
-             * SPC: Commit stable prefix if criteria met
-             * WhisperLive sends CUMULATIVE partials, so we track totalCommittedTokens
-             * and only analyze the uncommitted suffix
-             */
-            commitStablePrefix(currentTokens) {
-                const now = Date.now();
-
-                // Extract uncommitted suffix from cumulative stream
-                const uncommittedTokens = currentTokens.slice(this.totalCommittedTokens);
-
-                // First partial: initialize and return
-                if (this.workingRemainder.length === 0 && uncommittedTokens.length > 0) {
-                    this.workingRemainder = uncommittedTokens.slice();
-                    this.lastPartialTokens = uncommittedTokens.slice();
-                    this.stabilityCounters = new Array(uncommittedTokens.length).fill(0);
-                    this.stabilityTimestamp = now;
-                    console.log('[SPC] Initialized with', uncommittedTokens.length, 'uncommitted tokens');
-                    return;
-                }
-
-                // If no uncommitted tokens, nothing to do
-                if (uncommittedTokens.length === 0) {
-                    return;
-                }
-
-                // Compute LCP between LAST partial and CURRENT partial (uncommitted portions)
-                const lcp = this.computeLCP(this.lastPartialTokens, uncommittedTokens);
-                console.log('[SPC] LCP=', lcp, 'of', this.lastPartialTokens.length, 'uncommitted tokens');
-
-                // Update stability counters for matching prefix
-                const limit = Math.min(lcp, this.workingRemainder.length);
-                for (let i = 0; i < limit; i++) {
-                    this.stabilityCounters[i]++;
-                }
-                // Reset counters beyond the stable prefix
-                for (let i = limit; i < this.stabilityCounters.length; i++) {
-                    this.stabilityCounters[i] = 0;
-                }
-
-                // Check if prefix meets stability criteria
-                // Step 1: Find longest contiguous stable prefix
-                let commitLength = 0;
-                for (let i = 0; i < limit; i++) {
-                    const stableByFrames = this.stabilityCounters[i] >= this.K;
-                    const stableByTime = (now - this.stabilityTimestamp) >= this.T_ms;
-
-                    if (stableByFrames || stableByTime) {
-                        commitLength = i + 1;  // Keep extending
-                    } else {
-                        break;  // Stop at first unstable position
-                    }
-                }
-
-                // Step 2: Only commit if prefix is long enough
-                if (commitLength < this.Lmin) {
-                    commitLength = 0;
-                }
-
-                console.log('[SPC] Counters:', this.stabilityCounters.slice(0, 5), 'commitLength=', commitLength);
-
-                // Commit stable prefix and REMOVE from working remainder
-                if (commitLength > 0) {
-                    const toCommit = this.workingRemainder.slice(0, commitLength).join(' ');
-                    this.accumulatedText += (this.accumulatedText ? ' ' : '') + toCommit;
-                    console.log('[SPC] ✅ Committed:', toCommit.substring(0, 50) + '... (tokens committed:', commitLength + ')');
-
-                    // CRITICAL: Track total committed from cumulative stream
-                    this.totalCommittedTokens += commitLength;
-
-                    // Shrink working remainder and counters
-                    this.workingRemainder = this.workingRemainder.slice(commitLength);
-                    this.stabilityCounters = this.stabilityCounters.slice(commitLength);
-                    this.stabilityTimestamp = now;
-                }
-
-                // Update last partial snapshot for next frame's comparison (uncommitted portion)
-                this.lastPartialTokens = uncommittedTokens.slice();
-
-                // Update working remainder to latest uncommitted tokens (show latest wording in UI)
-                this.workingRemainder = uncommittedTokens.slice();
-
-                // Ensure counters array matches new length
-                const deficit = this.workingRemainder.length - this.stabilityCounters.length;
-                if (deficit > 0) {
-                    this.stabilityCounters.push(...new Array(deficit).fill(0));
-                }
+            _lcpRatio(oldT, newT) {
+                if (oldT.length === 0) return 1;
+                const l = this._lcp(oldT, newT);
+                return l / oldT.length;
             }
 
-            /**
-             * EW: Check if window slid and rescue if needed
-             */
-            checkAndRescueSlide(currentTokens) {
-                const now = Date.now();
+            _detectSlide(oldT, newT, now) {
+                const { W, eps, alpha, H, cooldownMs } = this.cfg;
+                const lcpR = this._lcpRatio(oldT, newT);
+                const sp = this._overlapSuffixPrefix(oldT, newT, W);
 
-                // Cooldown check
-                if (now - this.lastRescueTime < this.cooldownMs) {
-                    return;
+                const refinement = (lcpR >= (1 - eps)) || (sp >= Math.min(3, Math.floor(oldT.length / 2)));
+                if (refinement) { this.slideStreak = 0; return false; }
+
+                const candidate = (sp === 0) && (lcpR < alpha) && (oldT.length >= this.cfg.beta);
+                if (!candidate) { this.slideStreak = 0; return false; }
+
+                if (now - this.lastSlideAt < cooldownMs) return false;
+
+                this.slideStreak += 1;
+                if (this.slideStreak >= H) {
+                    this.slideStreak = 0;
+                    this.lastSlideAt = now;
+                    if (this.cfg.debug) console.log(`[EW] Slide detected (lcpR=${lcpR.toFixed(2)}, sp=${sp})`);
+                    return true;
                 }
-
-                if (this.lastPartialTokens.length === 0) {
-                    this.lastPartialTokens = currentTokens.slice();
-                    return;
-                }
-
-                // Compute slide signals
-                const lcpLen = this.computeLCP(this.lastPartialTokens, currentTokens);
-                const lcpRatio = this.lastPartialTokens.length > 0
-                    ? lcpLen / this.lastPartialTokens.length
-                    : 1;
-                const spOverlap = this.computeSPOverlap(this.lastPartialTokens, currentTokens);
-
-                // Check for slide condition
-                const isSlide = (
-                    spOverlap === 0 &&
-                    lcpRatio < this.alpha &&
-                    this.lastPartialTokens.length >= this.beta
-                );
-
-                console.log(`[EW] Checked: LCP=${lcpRatio.toFixed(2)}, SP=${spOverlap}, isSlide=${isSlide}`);
-
-                if (isSlide) {
-                    this.slideCounter++;
-                    console.log(`[EW] ⚠️  Slide detected (${this.slideCounter}/${this.H})`);
-
-                    // Hysteresis: require H consecutive slides
-                    if (this.slideCounter >= this.H) {
-                        // RESCUE: Append working remainder before it's lost
-                        if (this.workingRemainder.length > 0) {
-                            const rescued = this.workingRemainder.join(' ');
-                            this.accumulatedText += (this.accumulatedText ? ' ' : '') + rescued;
-                            console.log('[EW] 🚨 RESCUED uncommitted text:', rescued.substring(0, 50) + '...');
-
-                            // Reset state
-                            this.workingRemainder = currentTokens.slice();
-                            this.stabilityCounters = new Array(currentTokens.length).fill(0);
-                            this.lastRescueTime = now;
-                        }
-
-                        this.slideCounter = 0;
-                    }
-                } else {
-                    // Not a slide, reset counter
-                    if (this.slideCounter > 0) {
-                        console.log(`[EW] Reset counter (was ${this.slideCounter})`);
-                    }
-                    this.slideCounter = 0;
-                }
-
-                this.lastPartialTokens = currentTokens.slice();
+                return false;
             }
 
-            /**
-             * Ingest a partial transcript segment
-             */
-            ingestPartial(text) {
-                const tokens = this.tokenize(text);
+            _maxPrefixOverlapWithTail(prefix, tail, W) {
+                const maxk = Math.min(W, prefix.length, tail.length);
+                for (let k = maxk; k > 0; k--) {
+                    let ok = true;
+                    for (let i = 0; i < k; i++) {
+                        if (prefix[i] !== tail[tail.length - k + i]) { ok = false; break; }
+                    }
+                    if (ok) return k;
+                }
+                return 0;
+            }
 
+            _recentTailDuplicate(tokens) {
+                const guard = Math.max(this.cfg.recentTailGuard, tokens.length);
+                const tail = this.accTokens.slice(Math.max(0, this.accTokens.length - guard));
+                if (tokens.length > tail.length) return false;
+                const start = tail.length - tokens.length;
+                for (let i = 0; i < tokens.length; i++) {
+                    if (tail[start + i] !== tokens[i]) return false;
+                }
+                return true;
+            }
+
+            _appendToAccumulated(tokens, display) {
                 if (tokens.length === 0) return;
+                const space = this.accText.length ? " " : "";
+                this.accText = `${this.accText}${space}${display}`.trim();
+                this.accTokens.push(...tokens);
 
-                // 1. SPC: Commit stable prefix
-                this.commitStablePrefix(tokens);
-
-                // 2. EW: Check for slide and rescue if needed
-                this.checkAndRescueSlide(tokens);
+                // Enforce soft tail policy
+                const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
+                if (desiredHard > this.hardCommitted) this.hardCommitted = desiredHard;
             }
 
             /**
-             * BoF: Ingest a final transcript segment
+             * Soft-tail alignment & rewind
+             * If current partial diverges inside the editable tail, rollback up to R tokens
+             * (not crossing hardCommitted), then allow SPC/BoF to re-merge cleanly.
              */
-            ingestFinal(text) {
-                const normalized = text.trim();
+            _alignCurrWithTail(curr) {
+                const R = this.cfg.softTailTokens;
+                if (this.accTokens.length === 0) return;
 
-                // De-dupe exact finals
-                if (this.seenFinals.has(normalized)) {
-                    console.log('[BoF] Skipping duplicate final');
+                // Try direct overlap first
+                const direct = this._maxPrefixOverlapWithTail(curr, this.accTokens, Math.max(R, this.cfg.finalAlignW));
+                if (direct > 0) {
+                    if (this.cfg.debug) console.log(`[ALIGN] overlapK=${direct}`);
                     return;
                 }
-                this.seenFinals.add(normalized);
 
-                // Commit any remaining working remainder first
-                if (this.workingRemainder.length > 0) {
-                    const remaining = this.workingRemainder.join(' ');
-                    this.accumulatedText += (this.accumulatedText ? ' ' : '') + remaining;
-                    console.log('[BoF] Flushed remaining:', remaining.substring(0, 50) + '...');
-                    this.workingRemainder = [];
-                    this.stabilityCounters = [];
-                }
+                // Consider rewinding within the editable tail
+                const editableStart = Math.max(this.hardCommitted, this.accTokens.length - R);
+                const editableLen = this.accTokens.length - editableStart;
+                if (editableLen <= 0) return;
 
-                // Align final with accumulated tail to avoid dupes
-                const finalTokens = this.tokenize(normalized);
-                const accTokens = this.tokenize(this.accumulatedText);
-
-                if (accTokens.length > 0 && finalTokens.length > 0) {
-                    // Check for overlap in last W tokens
-                    const tailStart = Math.max(0, accTokens.length - this.alignWindow);
-                    const tail = accTokens.slice(tailStart);
-
-                    let overlapLen = 0;
-                    for (let k = Math.min(this.alignWindow, finalTokens.length); k >= 1; k--) {
-                        const tailSuffix = tail.slice(-k).join(' ');
-                        const finalPrefix = finalTokens.slice(0, k).join(' ');
-                        if (tailSuffix === finalPrefix) {
-                            overlapLen = k;
-                            break;
-                        }
+                for (let back = 1; back <= editableLen; back++) {
+                    const newTailLen = this.accTokens.length - back;
+                    const k = this._maxPrefixOverlapWithTail(curr, this.accTokens.slice(0, newTailLen), this.cfg.finalAlignW);
+                    if (k > 0) {
+                        // Rollback and let SPC/BoF handle the rest
+                        this.accTokens = this.accTokens.slice(0, newTailLen);
+                        this.accText = this._detok(this.accTokens);
+                        if (this.cfg.debug) console.log(`[REWIND] tokensRolledBack=${back} (found overlap k=${k})`);
+                        return;
                     }
-
-                    // Drop overlapped prefix from final
-                    const uniqueFinalTokens = finalTokens.slice(overlapLen);
-                    if (uniqueFinalTokens.length > 0) {
-                        const uniqueText = uniqueFinalTokens.join(' ');
-                        this.accumulatedText += (this.accumulatedText ? ' ' : '') + uniqueText;
-                        console.log(`[BoF] Added final (overlap=${overlapLen}):`, uniqueText.substring(0, 50) + '...');
-                    } else {
-                        console.log('[BoF] Final fully overlaps accumulated text');
-                    }
-                } else {
-                    // No overlap possible, just append
-                    this.accumulatedText += (this.accumulatedText ? ' ' : '') + normalized;
-                    console.log('[BoF] Added final:', normalized.substring(0, 50) + '...');
                 }
 
-                // Reset partial tracking
-                this.lastPartialTokens = [];
-                this.slideCounter = 0;
-            }
-
-            /**
-             * Get the full accumulated text
-             */
-            getFullText() {
-                return this.accumulatedText;
-            }
-
-            /**
-             * Get preview text (accumulated + current working remainder)
-             */
-            getPreviewText() {
-                let preview = this.accumulatedText;
-                if (this.workingRemainder.length > 0) {
-                    const remainder = this.workingRemainder.join(' ');
-                    preview += (preview ? ' ' : '') + remainder;
-                }
-                return preview;
-            }
-
-            /**
-             * Reset for new recording session
-             */
-            reset() {
-                this.accumulatedText = '';
-                this.workingRemainder = [];
-                this.lastPartialTokens = [];
-                this.stabilityCounters = [];
-                this.stabilityTimestamp = null;
-                this.slideCounter = 0;
-                this.lastRescueTime = 0;
-                this.seenFinals.clear();
-                this.totalCommittedTokens = 0;
-                console.log('[Accumulator] Reset for new session');
+                // No overlap found inside tail → rollback full tail
+                this.accTokens = this.accTokens.slice(0, editableStart);
+                this.accText = this._detok(this.accTokens);
+                if (this.cfg.debug) console.log(`[REWIND] tokensRolledBack=${editableLen} (full soft tail)`);
             }
         }
 
