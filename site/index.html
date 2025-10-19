@@ -15,19 +15,82 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
+            padding: 20px;
+            margin: 0;
+        }
+
+        .app-wrapper {
+            max-width: 1400px;
+            margin: 0 auto;
+            height: calc(100vh - 40px);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px 12px 0 0;
+            padding: 20px 30px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .session-info {
             display: flex;
             align-items: center;
-            justify-content: center;
-            padding: 20px;
+            gap: 10px;
+            font-size: 12px;
+            color: #6b7280;
+        }
+
+        .session-id {
+            font-family: monospace;
+            background: #f3f4f6;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        #shareBtn {
+            background: #667eea;
+            color: white;
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        #shareBtn:hover:not(:disabled) {
+            background: #5568d3;
         }
 
         .container {
+            display: flex;
+            gap: 20px;
+            flex: 1;
             background: white;
-            border-radius: 12px;
+            border-radius: 0 0 12px 12px;
+            overflow: hidden;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 800px;
-            width: 100%;
-            padding: 40px;
+        }
+
+        .left-pane {
+            flex: 1.5;
+            padding: 30px;
+            overflow-y: auto;
+            border-right: 2px solid #e5e7eb;
+        }
+
+        .right-pane {
+            flex: 1;
+            padding: 30px;
+            background: #f9fafb;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
         }
 
         h1 {
@@ -235,59 +298,228 @@
         .indicator.yellow {
             background: #f59e0b;
         }
+
+        /* AI Panel Styles */
+        .panel-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .action-btn {
+            padding: 8px 16px;
+            background: white;
+            color: #374151;
+            border: 2px solid #d1d5db;
+            font-size: 13px;
+            flex: 1;
+            min-width: 120px;
+        }
+
+        .action-btn:hover:not(:disabled) {
+            background: #f3f4f6;
+            border-color: #9ca3af;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .transcript-preview {
+            background: white;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 15px;
+            flex: 1;
+            overflow-y: auto;
+            margin-bottom: 15px;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #4b5563;
+        }
+
+        .transcript-preview.empty {
+            color: #9ca3af;
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .copy-feedback {
+            background: #10b981;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 12px;
+            text-align: center;
+            margin-top: 10px;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .copy-feedback.show {
+            opacity: 1;
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .container {
+                flex-direction: column;
+            }
+
+            .left-pane {
+                border-right: none;
+                border-bottom: 2px solid #e5e7eb;
+            }
+
+            .right-pane {
+                max-height: 400px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Streaming Automatic Speech Recognition</h1>
-        <p class="subtitle">Real-time speech recognition</p>
-
-        <div class="settings">
-            <div class="setting-group">
-                <label>Whisper Model</label>
-                <div style="padding: 10px; background: #f3f4f6; border-radius: 6px; color: #6b7280;">
-                    faster-whisper-small.en (English only - Fast)
+    <div class="app-wrapper">
+        <!-- Header with Session Info -->
+        <div class="header">
+            <div class="header-top">
+                <h1>Streaming Automatic Speech Recognition</h1>
+                <div class="session-info">
+                    <span>Session:</span>
+                    <span class="session-id" id="sessionId">...</span>
+                    <button id="shareBtn">📋 Share</button>
                 </div>
             </div>
-            <div class="setting-group">
-                <label for="languageInput">Language Code</label>
-                <input type="text" id="languageInput" value="en" placeholder="en">
+            <p class="subtitle">Real-time speech recognition</p>
+        </div>
+
+        <!-- Split Pane Container -->
+        <div class="container">
+            <!-- Left Pane: Transcription -->
+            <div class="left-pane">
+                <div class="settings">
+                    <div class="setting-group">
+                        <label>Whisper Model</label>
+                        <div style="padding: 10px; background: #f3f4f6; border-radius: 6px; color: #6b7280;">
+                            faster-whisper-small.en (English only - Fast)
+                        </div>
+                    </div>
+                    <div class="setting-group">
+                        <label for="languageInput">Language Code</label>
+                        <input type="text" id="languageInput" value="en" placeholder="en">
+                    </div>
+                </div>
+
+                <div id="status" class="status disconnected">
+                    <span class="indicator red"></span>
+                    <span id="statusText">Disconnected</span>
+                </div>
+
+                <div class="controls">
+                    <button id="startBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M12 6v12"/>
+                        </svg>
+                        Start Recording
+                    </button>
+                    <button id="stopBtn" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="6" y="6" width="12" height="12" rx="2"/>
+                        </svg>
+                        Stop Recording
+                    </button>
+                </div>
+
+                <div class="transcript-box" id="transcriptBox">
+                    <div style="color: #9ca3af; text-align: center; padding: 40px 20px;">
+                        Click "Start Recording" to begin transcription
+                    </div>
+                </div>
+
+                <div class="footer">
+                    rewardie.com
+                </div>
             </div>
-        </div>
 
-        <div id="status" class="status disconnected">
-            <span class="indicator red"></span>
-            <span id="statusText">Disconnected</span>
-        </div>
+            <!-- Right Pane: AI Assistant -->
+            <div class="right-pane">
+                <div class="panel-title">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                    AI Assistant
+                </div>
 
-        <div class="controls">
-            <button id="startBtn">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"/>
-                    <path d="M12 6v12"/>
-                </svg>
-                Start Recording
-            </button>
-            <button id="stopBtn" disabled>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="6" y="6" width="12" height="12" rx="2"/>
-                </svg>
-                Stop Recording
-            </button>
-        </div>
+                <div class="action-buttons">
+                    <button class="action-btn" id="copyTranscriptBtn">
+                        📋 Copy All
+                    </button>
+                    <button class="action-btn" id="downloadTranscriptBtn">
+                        💾 Download
+                    </button>
+                </div>
 
-        <div class="transcript-box" id="transcriptBox">
-            <div style="color: #9ca3af; text-align: center; padding: 40px 20px;">
-                Click "Start Recording" to begin transcription
+                <div class="transcript-preview empty" id="transcriptPreview">
+                    <p>Transcript will appear here...</p>
+                    <p style="margin-top: 10px; font-size: 12px;">You can copy or download the full transcript to use with Claude or other AI tools.</p>
+                </div>
+
+                <div class="copy-feedback" id="copyFeedback">
+                    ✓ Copied to clipboard!
+                </div>
             </div>
-        </div>
-
-        <div class="footer">
-            rewardie.com
         </div>
     </div>
 
     <script>
+        // ============================================================
+        // SESSION MANAGEMENT
+        // ============================================================
+        let sessionId = null;
+        let fullTranscript = [];  // Array of {text, isFinal, timestamp}
+
+        function generateSessionId() {
+            // Generate a short, readable session ID (8 chars)
+            return Math.random().toString(36).substring(2, 10);
+        }
+
+        function getOrCreateSession() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const sessionParam = urlParams.get('session');
+
+            if (sessionParam) {
+                // Join existing session
+                sessionId = sessionParam;
+                console.log('Joining session:', sessionId);
+            } else {
+                // Create new session
+                sessionId = generateSessionId();
+                console.log('Created new session:', sessionId);
+
+                // Update URL without reload
+                const newUrl = `${window.location.pathname}?session=${sessionId}`;
+                window.history.replaceState({}, '', newUrl);
+            }
+
+            // Display session ID
+            document.getElementById('sessionId').textContent = sessionId;
+        }
+
+        // Initialize session on page load
+        getOrCreateSession();
+
+        // ============================================================
+        // UI ELEMENTS
+        // ============================================================
         let ws = null;
         let audioContext = null;
         let mediaStream = null;
@@ -299,7 +531,12 @@
         const statusDiv = document.getElementById('status');
         const statusText = document.getElementById('statusText');
         const transcriptBox = document.getElementById('transcriptBox');
+        const transcriptPreview = document.getElementById('transcriptPreview');
         const languageInput = document.getElementById('languageInput');
+        const shareBtn = document.getElementById('shareBtn');
+        const copyTranscriptBtn = document.getElementById('copyTranscriptBtn');
+        const downloadTranscriptBtn = document.getElementById('downloadTranscriptBtn');
+        const copyFeedback = document.getElementById('copyFeedback');
 
         function setStatus(state, message) {
             statusDiv.className = `status ${state}`;
@@ -318,6 +555,25 @@
         }
 
         let lastDisplayedText = '';  // Track last displayed text to avoid duplicates
+
+        function updateTranscriptPreview() {
+            // Update the AI panel preview with full transcript
+            const finalTexts = fullTranscript
+                .filter(item => item.isFinal)
+                .map(item => item.text)
+                .join('\n\n');
+
+            if (finalTexts.trim()) {
+                transcriptPreview.classList.remove('empty');
+                transcriptPreview.textContent = finalTexts;
+            } else {
+                transcriptPreview.classList.add('empty');
+                transcriptPreview.innerHTML = '<p>Transcript will appear here...</p><p style="margin-top: 10px; font-size: 12px;">You can copy or download the full transcript to use with Claude or other AI tools.</p>';
+            }
+
+            // Auto-scroll preview
+            transcriptPreview.scrollTop = transcriptPreview.scrollHeight;
+        }
 
         function addTranscript(text, isFinal = false) {
             // Deduplicate: ignore if this exact text was just displayed
@@ -354,9 +610,15 @@
                 transcriptBox.appendChild(entry);
             }
 
-            // Track last displayed final text
+            // Track in fullTranscript array for export
             if (isFinal) {
                 lastDisplayedText = text;
+                fullTranscript.push({
+                    text: text,
+                    isFinal: true,
+                    timestamp: new Date().toISOString()
+                });
+                updateTranscriptPreview();
             }
 
             // Auto-scroll
@@ -504,6 +766,80 @@
 
         startBtn.addEventListener('click', startRecording);
         stopBtn.addEventListener('click', stopRecording);
+
+        // ============================================================
+        // AI PANEL ACTIONS
+        // ============================================================
+
+        // Share button - copy session URL to clipboard
+        shareBtn.addEventListener('click', async () => {
+            const shareUrl = `${window.location.origin}${window.location.pathname}?session=${sessionId}`;
+
+            try {
+                await navigator.clipboard.writeText(shareUrl);
+                const originalText = shareBtn.textContent;
+                shareBtn.textContent = '✓ Copied!';
+                shareBtn.style.background = '#10b981';
+
+                setTimeout(() => {
+                    shareBtn.textContent = originalText;
+                    shareBtn.style.background = '';
+                }, 2000);
+            } catch (err) {
+                console.error('Failed to copy:', err);
+                alert('Share URL: ' + shareUrl);
+            }
+        });
+
+        // Copy transcript button
+        copyTranscriptBtn.addEventListener('click', async () => {
+            const fullText = fullTranscript
+                .filter(item => item.isFinal)
+                .map(item => item.text)
+                .join('\n\n');
+
+            if (!fullText.trim()) {
+                alert('No transcript available yet. Start recording first!');
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(fullText);
+
+                // Show feedback
+                copyFeedback.classList.add('show');
+                setTimeout(() => {
+                    copyFeedback.classList.remove('show');
+                }, 2000);
+            } catch (err) {
+                console.error('Failed to copy:', err);
+                alert('Failed to copy to clipboard');
+            }
+        });
+
+        // Download transcript button
+        downloadTranscriptBtn.addEventListener('click', () => {
+            const fullText = fullTranscript
+                .filter(item => item.isFinal)
+                .map(item => item.text)
+                .join('\n\n');
+
+            if (!fullText.trim()) {
+                alert('No transcript available yet. Start recording first!');
+                return;
+            }
+
+            // Create download
+            const blob = new Blob([fullText], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `transcript-${sessionId}-${new Date().toISOString().split('T')[0]}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        });
     </script>
 </body>
 </html>
