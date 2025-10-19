@@ -94,15 +94,22 @@ echo "Cleaning up any broken NVIDIA repositories..."
 sudo rm -f /etc/apt/sources.list.d/nvidia-*.list 2>/dev/null || true
 
 sudo apt-get update
+
+# Install Python 3.10 (WhisperLive requires numpy 1.26.4 which needs Python 3.9+)
+echo "Installing Python 3.10 from deadsnakes PPA..."
+sudo apt-get install -y software-properties-common
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt-get update
 sudo apt-get install -y \
-    python3 \
-    python3-pip \
-    python3-venv \
+    python3.10 \
+    python3.10-venv \
+    python3.10-dev \
     git \
     ffmpeg \
     portaudio19-dev
 
 echo "✅ System dependencies installed"
+echo "✅ Python 3.10 installed (required for WhisperLive)"
 echo ""
 
 # Step 2: Create WhisperLive directory
@@ -129,16 +136,17 @@ echo "✅ WhisperLive repository ready"
 echo ""
 
 # Step 4: Create Python virtual environment
-echo "[4/7] Creating Python virtual environment..."
+echo "[4/7] Creating Python virtual environment with Python 3.10..."
 if [ -d "venv" ]; then
     echo "Virtual environment exists, recreating..."
     rm -rf venv
 fi
 
-python3 -m venv venv
+python3.10 -m venv venv
 source venv/bin/activate
 
-echo "✅ Virtual environment created"
+echo "✅ Virtual environment created with Python 3.10"
+python --version
 echo ""
 
 # Step 5: Install WhisperLive and dependencies
