@@ -393,7 +393,7 @@
             <div class="header-top">
                 <div>
                     <h1>Streaming Automatic Speech Recognition</h1>
-                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.0</span></p>
+                    <p class="subtitle">Real-time speech recognition <span style="color: #9ca3af; font-size: 11px;">v2.4.1</span></p>
                 </div>
                 <div class="session-info">
                     <span>Session:</span>
@@ -605,25 +605,22 @@
                 }
 
                 // Commit stable prefix
-                if (commitLength > 0) {
+                if (commitLength > 0 && commitLength <= lcp) {
                     const toCommit = this.workingRemainder.slice(0, commitLength).join(' ');
                     this.accumulatedText += (this.accumulatedText ? ' ' : '') + toCommit;
                     console.log('[SPC] Committed stable prefix:', toCommit.substring(0, 50) + '...');
-
-                    // Remove committed tokens from working remainder
-                    this.workingRemainder = this.workingRemainder.slice(commitLength);
-                    this.stabilityCounters = this.stabilityCounters.slice(commitLength);
                     this.stabilityTimestamp = now;
                 }
 
-                // Update working remainder with new tokens
-                if (lcp < currentTokens.length) {
-                    this.workingRemainder = currentTokens.slice(lcp);
-                    this.stabilityCounters = [
-                        ...this.stabilityCounters.slice(0, lcp),
-                        ...new Array(currentTokens.length - lcp).fill(0)
-                    ];
+                // Replace working remainder with current tokens (partials refine, not append!)
+                this.workingRemainder = currentTokens.slice();
+
+                // Adjust stability counters: keep first lcp counters, reset rest
+                const newCounters = new Array(currentTokens.length).fill(0);
+                for (let i = 0; i < Math.min(lcp, this.stabilityCounters.length, currentTokens.length); i++) {
+                    newCounters[i] = this.stabilityCounters[i];
                 }
+                this.stabilityCounters = newCounters;
             }
 
             /**
@@ -809,8 +806,8 @@
             overlapWindow: 8,        // EW: 8-token window
             slideThreshold: 0.4,     // EW: LCP ratio < 0.4 = slide
             minSlideLength: 5,       // EW: min 5 tokens to rescue
-            hysteresisFrames: 2,     // EW: 2 consecutive slides
-            cooldownMs: 250,         // EW: 250ms cooldown
+            hysteresisFrames: 1,     // EW: 1 frame (immediate rescue)
+            cooldownMs: 200,         // EW: 200ms cooldown
             alignWindow: 10          // BoF: 10-token alignment
         });
 
@@ -882,6 +879,7 @@
         }
 
         let lastDisplayedText = '';  // Track last displayed text to avoid duplicates
+        let displayedFinals = new Set();  // Track displayed finals to prevent UI duplicates
 
         function updateTranscriptPreview() {
             // Get preview text from accumulator (committed + working remainder)
@@ -905,6 +903,15 @@
             // Feed text to accumulator (SPC + EW + BoF logic)
             if (isFinal) {
                 transcriptAccumulator.ingestFinal(text);
+
+                // Skip displaying duplicate finals in UI
+                const normalized = text.trim();
+                if (displayedFinals.has(normalized)) {
+                    // Still update preview, but don't add duplicate UI element
+                    updateTranscriptPreview();
+                    return;
+                }
+                displayedFinals.add(normalized);
             } else {
                 transcriptAccumulator.ingestPartial(text);
             }
@@ -950,6 +957,7 @@
                 // Reset all tracking for new session
                 lastDisplayedText = '';
                 fullTranscript = [];
+                displayedFinals.clear();  // Reset displayed finals tracking
                 transcriptAccumulator.reset();  // Reset SPC + EW + BoF state
 
                 setStatus('connecting', 'Connecting to server...');
