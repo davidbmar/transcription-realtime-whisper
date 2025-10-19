@@ -3,20 +3,26 @@ set -euo pipefail
 exec > >(tee -a "logs/$(basename $0 .sh)-$(date +%Y%m%d-%H%M%S).log") 2>&1
 
 # ============================================================================
-# RIVA-211: Startup GPU and Restore Working State
+# Script 220: Startup GPU and Restore Working State
 # ============================================================================
-# Complete one-command restoration of working Conformer-CTC streaming setup.
-# Run this in the morning after shutting down the GPU overnight.
+# Complete one-command restoration of WhisperLive streaming setup.
+# Run this after shutting down the GPU to save costs.
 #
 # What this does:
-# 1. Starts GPU EC2 instance
+# 1. Starts GPU EC2 instance (uses GPU_INSTANCE_ID from .env)
 # 2. Waits for instance to be ready
-# 3. Checks if GPU IP changed (updates .env if needed)
-# 4. Verifies RIVA server is running
-# 5. If needed, deploys Conformer-CTC model
-# 6. Restarts WebSocket bridge with correct config
-# 7. Runs full health check
+# 3. Queries AWS for current IP (IP changes on every stop/start)
+# 4. If IP changed, updates ALL config files:
+#    - .env (GPU_INSTANCE_IP, RIVA_HOST)
+#    - .env-http (DOMAIN, GPU_HOST)
+# 5. If IP changed, updates AWS security groups
+# 6. If IP changed, recreates Docker containers (Caddy) to load new IP
+# 7. Verifies SSH connectivity
+# 8. Checks WhisperLive service status
+# 9. Deploys WhisperLive if needed
+# 10. Runs full health check
 #
+# Architecture: Instance ID is source of truth, IP is resolved at startup
 # Total time: 5-10 minutes (2min startup + 3-8min deployment if needed)
 # ============================================================================
 
@@ -108,33 +114,61 @@ if [ "$CURRENT_IP" != "$OLD_IP" ]; then
   echo "║  New IP: $CURRENT_IP"
   echo "╟────────────────────────────────────────────────────────────╢"
   echo "║  Actions being taken:                                      ║"
-  echo "║   1. Updating .env file with new IP                        ║"
+  echo "║   1. Updating all config files (.env, .env-http)           ║"
   echo "║   2. Exporting environment variables                       ║"
-  echo "║   3. Reloading .env configuration                          ║"
+  echo "║   3. Reloading configuration                               ║"
   echo "║   4. Updating AWS security groups                          ║"
+  echo "║   5. Recreating Docker containers (Caddy)                  ║"
   echo "╚════════════════════════════════════════════════════════════╝"
   echo ""
 
-  log_info "Step 1/4: Updating .env file..."
+  log_info "Step 1/5: Updating configuration files..."
+
+  # Update .env
   sed -i "s/^GPU_INSTANCE_IP=.*/GPU_INSTANCE_IP=$CURRENT_IP/" .env
   sed -i "s/^RIVA_HOST=.*/RIVA_HOST=$CURRENT_IP/" .env
-  log_success "✅ .env file updated"
+  log_success "  ✅ .env updated"
 
-  log_info "Step 2/4: Exporting environment variables..."
+  # Update .env-http (for WhisperLive edge proxy)
+  if [ -f .env-http ]; then
+    sed -i "s/^DOMAIN=.*/DOMAIN=$CURRENT_IP/" .env-http
+    sed -i "s/^GPU_HOST=.*/GPU_HOST=$CURRENT_IP/" .env-http
+    log_success "  ✅ .env-http updated"
+  fi
+
+  log_success "✅ All configuration files updated"
+
+  log_info "Step 2/5: Exporting environment variables..."
   export GPU_INSTANCE_IP="$CURRENT_IP"
   export RIVA_HOST="$CURRENT_IP"
   log_success "✅ Variables exported for child scripts"
 
-  log_info "Step 3/4: Reloading .env configuration..."
+  log_info "Step 3/5: Reloading .env configuration..."
   load_environment
   log_success "✅ Configuration reloaded"
 
-  log_info "Step 4/4: Updating AWS security groups..."
-  if "$(dirname "$0")/030-configure-security-groups.sh" --gpu; then
+  log_info "Step 4/5: Updating AWS security groups..."
+  if echo "1" | "$(dirname "$0")/030-configure-gpu-security.sh" > /dev/null 2>&1; then
     log_success "✅ Security groups updated successfully"
   else
     log_warn "⚠️  Security group update encountered issues"
-    log_info "You may need to run manually: ./scripts/030-configure-security-groups.sh --gpu"
+    log_info "You may need to run manually: ./scripts/030-configure-gpu-security.sh"
+  fi
+
+  echo ""
+  log_info "Step 5/5: Recreating Docker containers with new IP..."
+
+  # Recreate Caddy container to pick up new GPU_HOST from .env-http
+  if [ -f docker-compose.yml ]; then
+    log_info "  Stopping Caddy container..."
+    docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
+
+    log_info "  Starting Caddy with updated GPU IP..."
+    if docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null; then
+      log_success "  ✅ Caddy container recreated"
+    else
+      log_warn "  ⚠️  Failed to recreate Caddy container"
+    fi
   fi
 
   echo ""
