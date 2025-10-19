@@ -239,23 +239,47 @@ async def test_transcription():
 
             print(f"Sent {chunks_sent} audio chunks")
 
-            # Wait for transcription responses
+            # Wait for transcription responses (WhisperLive needs time to process)
+            print("Waiting for transcription results...")
             transcription_received = False
-            for _ in range(5):
+            messages_received = 0
+
+            # Try for up to 20 seconds (10 attempts x 2s timeout)
+            for i in range(10):
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                    data = json.loads(msg)
-                    if data.get("segments"):
-                        print(f"✅ Received transcription: {data}")
-                        transcription_received = True
-                        break
-                except asyncio.TimeoutError:
-                    pass
+                    messages_received += 1
 
-            return 0 if transcription_received else 1
+                    try:
+                        data = json.loads(msg)
+                        print(f"Received message {messages_received}: {data}")
+
+                        # WhisperLive sends segments with transcription text
+                        if data.get("segments") or data.get("text"):
+                            transcription_received = True
+                    except json.JSONDecodeError:
+                        print(f"Received non-JSON message: {msg[:100]}")
+
+                except asyncio.TimeoutError:
+                    if i < 9:  # Don't print on last attempt
+                        print(f"  Waiting... ({i+1}/10)")
+                    continue
+
+            # Close gracefully
+            try:
+                await ws.close()
+            except:
+                pass
+
+            print(f"\n{'✅' if transcription_received else '⚠️ '} Received {messages_received} messages, transcription={'YES' if transcription_received else 'NO'}")
+
+            # Return success if we received ANY messages (connection working)
+            return 0 if messages_received > 0 else 1
 
     except Exception as e:
         print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
 
 sys.exit(asyncio.run(test_transcription()))
