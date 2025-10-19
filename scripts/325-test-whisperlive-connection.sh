@@ -3,9 +3,9 @@ set -euo pipefail
 exec > >(tee -a "logs/$(basename $0 .sh)-$(date +%Y%m%d-%H%M%S).log") 2>&1
 
 # ============================================================================
-# 315: Test WhisperLive End-to-End Connection
+# 325: Test WhisperLive End-to-End Connection
 # ============================================================================
-# Tests the full WhisperLive chain: Browser→Edge→GPU
+# Tests the full WhisperLive chain: Edge→GPU with real audio from S3
 # This script should be run FROM THE EDGE EC2 INSTANCE.
 #
 # What this does:
@@ -30,7 +30,7 @@ else
 fi
 
 echo "============================================"
-echo "315: Test WhisperLive Connection"
+echo "325: Test WhisperLive Connection"
 echo "============================================"
 echo ""
 
@@ -116,7 +116,7 @@ async def test_connection():
 
             # Send config
             config = {
-                "uid": "test-315",
+                "uid": "test-325",
                 "task": "transcribe",
                 "language": "en",
                 "model": "Systran/faster-whisper-small.en",
@@ -168,9 +168,36 @@ if ! command -v ffmpeg &> /dev/null; then
     sudo apt install -y ffmpeg
 fi
 
-# Create a simple test audio file (silent beep)
-log_info "Generating test audio..."
-ffmpeg -f lavfi -i "sine=frequency=1000:duration=2" -ar 16000 -ac 1 -f f32le -y /tmp/test_audio.pcm -loglevel quiet
+# Check if AWS CLI is installed
+if ! command -v aws &> /dev/null; then
+    log_warn "AWS CLI not installed, installing..."
+    sudo apt install -y awscli
+fi
+
+# Download test audio from S3
+S3_TEST_AUDIO="s3://dbm-cf-2-web/integration-test/test-validation.wav"
+log_info "Downloading test audio from S3..."
+log_info "Source: $S3_TEST_AUDIO"
+
+mkdir -p /tmp/whisperlive-test
+if aws s3 cp "$S3_TEST_AUDIO" /tmp/whisperlive-test/test_audio.wav --quiet 2>/dev/null; then
+    log_success "Downloaded test audio from S3"
+
+    # Convert to Float32 PCM (WhisperLive expects Float32, not Int16!)
+    log_info "Converting to Float32 PCM @ 16kHz mono..."
+    ffmpeg -i /tmp/whisperlive-test/test_audio.wav \
+        -f f32le \
+        -acodec pcm_f32le \
+        -ac 1 \
+        -ar 16000 \
+        -y /tmp/test_audio.pcm \
+        -loglevel quiet
+
+    log_success "Audio converted to Float32 PCM"
+else
+    log_warn "Could not download from S3, generating synthetic test audio..."
+    ffmpeg -f lavfi -i "sine=frequency=1000:duration=2" -ar 16000 -ac 1 -f f32le -y /tmp/test_audio.pcm -loglevel quiet
+fi
 
 # Send test audio and check for transcription
 log_info "Sending test audio to WhisperLive..."
@@ -188,7 +215,7 @@ async def test_transcription():
         async with websockets.connect(uri, ping_timeout=10) as ws:
             # Send config
             config = {
-                "uid": "test-audio-315",
+                "uid": "test-audio-325",
                 "task": "transcribe",
                 "language": "en",
                 "model": "Systran/faster-whisper-small.en",
