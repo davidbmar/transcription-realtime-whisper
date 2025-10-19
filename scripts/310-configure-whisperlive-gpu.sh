@@ -183,6 +183,10 @@ echo ""
 # Step 7: Create systemd service
 echo "[7/7] Creating systemd service..."
 
+# Set library paths for cuDNN and cuBLAS (installed via pip)
+CUDNN_LIB_PATH="$HOME/whisperlive/WhisperLive/venv/lib/python3.9/site-packages/nvidia/cudnn/lib"
+CUBLAS_LIB_PATH="$HOME/whisperlive/WhisperLive/venv/lib/python3.9/site-packages/nvidia/cublas/lib"
+
 sudo tee /etc/systemd/system/whisperlive.service > /dev/null << EOF
 [Unit]
 Description=WhisperLive WebSocket Server
@@ -193,6 +197,7 @@ Type=simple
 User=$USER
 WorkingDirectory=$HOME/whisperlive/WhisperLive
 Environment="PATH=$HOME/whisperlive/WhisperLive/venv/bin"
+Environment="LD_LIBRARY_PATH=$CUDNN_LIB_PATH:$CUBLAS_LIB_PATH"
 ExecStart=$HOME/whisperlive/WhisperLive/venv/bin/python3 run_server.py \\
     --port 9090 \\
     --backend faster_whisper
