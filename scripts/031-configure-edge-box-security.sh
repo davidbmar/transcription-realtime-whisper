@@ -638,14 +638,13 @@ while true; do
             log_success "═══════════════════════════════════════════════════════════"
             echo ""
             echo "Configuration Summary:"
-            echo "  Security Group: $BUILDBOX_SG"
+            echo "  Security Group: $EDGE_BOX_SG"
             echo "  Clients File: $CLIENTS_FILE"
             echo ""
 
-            local -a clients
-            local -a labels
-            load_clients clients labels
-            echo "  Authorized Clients: ${#clients[@]}"
+            # Count clients (without using local in main script)
+            clients_count=$(grep -v '^#' "$CLIENTS_FILE" | grep -v '^$' | wc -l)
+            echo "  Authorized Clients: $clients_count"
             echo ""
             echo "Next Steps:"
             echo "  • Test web access: https://${BUILDBOX_PUBLIC_IP:-<buildbox-ip>}:8444/demo.html"
