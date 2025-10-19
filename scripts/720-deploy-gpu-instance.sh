@@ -264,11 +264,11 @@ deploy_instance() {
     echo -e "${BLUE}🔑 Setting up SSH key...${NC}"
     local ssh_key_path="$HOME/.ssh/${SSH_KEY_NAME}.pem"
 
-    if [ ! -f "$ssh_key_path" ]; then
-        json_log "$SCRIPT_NAME" "ssh_key" "ok" "Creating SSH key pair" \
-            "key_name=${SSH_KEY_NAME}"
-
-        # Check if key exists in AWS
+    if [ -f "$ssh_key_path" ]; then
+        # Local key exists - use it
+        print_status "ok" "Using existing SSH key: $ssh_key_path"
+    else
+        # Check if key exists in AWS but not locally
         local key_exists=$(aws ec2 describe-key-pairs \
             --key-names "${SSH_KEY_NAME}" \
             --region "${AWS_REGION}" \
@@ -276,23 +276,41 @@ deploy_instance() {
             --output text 2>/dev/null || echo "None")
 
         if [ "$key_exists" != "None" ] && [ "$key_exists" != "null" ]; then
-            # Generate new unique key name
-            SSH_KEY_NAME="${SSH_KEY_NAME}-$(date +%Y%m%d-%H%M%S)"
-            ssh_key_path="$HOME/.ssh/${SSH_KEY_NAME}.pem"
-            update_env_file "SSH_KEY_NAME" "$SSH_KEY_NAME"
+            # Key exists in AWS but not locally - ERROR
+            echo ""
+            print_status "error" "AWS key pair '${SSH_KEY_NAME}' exists but local file not found at: $ssh_key_path"
+            echo ""
+            echo -e "${YELLOW}Choose one of the following options:${NC}"
+            echo ""
+            echo -e "  ${CYAN}1. Copy existing key to expected location:${NC}"
+            echo "     cp /path/to/your/${SSH_KEY_NAME}.pem $ssh_key_path"
+            echo "     chmod 400 $ssh_key_path"
+            echo ""
+            echo -e "  ${CYAN}2. Delete AWS key pair to allow recreation:${NC}"
+            echo "     aws ec2 delete-key-pair --key-name ${SSH_KEY_NAME} --region ${AWS_REGION}"
+            echo "     Then re-run this script"
+            echo ""
+            echo -e "  ${CYAN}3. Update SSH_KEY_NAME in .env to a new value:${NC}"
+            echo "     Example: SSH_KEY_NAME=riva-key-$(date +%Y%m%d)"
+            echo "     Then re-run this script"
+            echo ""
+            json_log "$SCRIPT_NAME" "ssh_key" "error" "Key exists in AWS but not locally" \
+                "key_name=${SSH_KEY_NAME},local_path=$ssh_key_path"
+            exit 1
+        else
+            # Key doesn't exist anywhere - create it
+            json_log "$SCRIPT_NAME" "ssh_key" "ok" "Creating new SSH key pair" \
+                "key_name=${SSH_KEY_NAME}"
+
+            aws ec2 create-key-pair \
+                --key-name "${SSH_KEY_NAME}" \
+                --query 'KeyMaterial' \
+                --output text \
+                --region "${AWS_REGION}" > "$ssh_key_path"
+
+            chmod 400 "$ssh_key_path"
+            print_status "ok" "Created SSH key: $ssh_key_path"
         fi
-
-        # Create new key pair
-        aws ec2 create-key-pair \
-            --key-name "${SSH_KEY_NAME}" \
-            --query 'KeyMaterial' \
-            --output text \
-            --region "${AWS_REGION}" > "$ssh_key_path"
-
-        chmod 400 "$ssh_key_path"
-        print_status "ok" "Created SSH key: $ssh_key_path"
-    else
-        print_status "ok" "Using existing SSH key: $ssh_key_path"
     fi
 
     # Step 2: Ensure security group exists
