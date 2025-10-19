@@ -244,16 +244,13 @@
 
         <div class="settings">
             <div class="setting-group">
-                <label for="modelSelect">Whisper Model</label>
-                <select id="modelSelect">
-                    <option value="Systran/faster-whisper-small.en">Small (English only - Fast)</option>
-                    <option value="Systran/faster-whisper-medium.en">Medium (English only)</option>
-                    <option value="Systran/faster-whisper-large-v2">Large v2 (Multilingual)</option>
-                    <option value="Systran/faster-whisper-large-v3">Large v3 (Multilingual - Best)</option>
-                </select>
+                <label>Whisper Model</label>
+                <div style="padding: 10px; background: #f3f4f6; border-radius: 6px; color: #6b7280;">
+                    faster-whisper-small.en (English only - Fast)
+                </div>
             </div>
             <div class="setting-group">
-                <label for="languageInput">Language Code (e.g., en, es, fr)</label>
+                <label for="languageInput">Language Code</label>
                 <input type="text" id="languageInput" value="en" placeholder="en">
             </div>
         </div>
@@ -302,7 +299,6 @@
         const statusDiv = document.getElementById('status');
         const statusText = document.getElementById('statusText');
         const transcriptBox = document.getElementById('transcriptBox');
-        const modelSelect = document.getElementById('modelSelect');
         const languageInput = document.getElementById('languageInput');
 
         function setStatus(state, message) {
@@ -387,7 +383,7 @@
                         uid: 'browser-' + Date.now(),
                         task: 'transcribe',
                         language: languageInput.value,
-                        model: modelSelect.value,
+                        model: 'Systran/faster-whisper-small.en',  // Fixed to small.en (only model that fits in T4 GPU)
                         use_vad: false
                     };
                     console.log('Sending config:', config);
