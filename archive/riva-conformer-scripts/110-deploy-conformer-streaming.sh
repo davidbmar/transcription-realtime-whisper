@@ -25,14 +25,13 @@ source "$(dirname "$0")/riva-common-functions.sh"
 load_environment
 
 # Validate required environment variables
-if [ -z "${GPU_INSTANCE_IP:-}" ] || [ -z "${NGC_API_KEY:-}" ]; then
+if [ -z "${GPU_INSTANCE_IP:-}" ]; then
   echo "❌ ERROR: Required environment variables not set"
   echo "   GPU_INSTANCE_IP: ${GPU_INSTANCE_IP:-NOT SET}"
-  echo "   NGC_API_KEY: ${NGC_API_KEY:-NOT SET}"
   exit 1
 fi
 
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/dbm-sep23-2025.pem}"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/${SSH_KEY_NAME}.pem}"
 S3_RMIR="s3://dbm-cf-2-web/bintarball/riva-models/conformer/conformer-ctc-xl-streaming-40ms.rmir"
 S3_SOURCE="s3://dbm-cf-2-web/bintarball/riva-models/conformer/Conformer-CTC-XL_spe-128_en-US_Riva-ASR-SET-4.0.riva"
 
@@ -45,6 +44,18 @@ log_info "Checking for pre-built RMIR in S3..."
 if aws s3 ls "$S3_RMIR" >/dev/null 2>&1; then
     log_success "✅ Pre-built RMIR found in S3"
     USE_PREBUILT=true
+
+    # Download RMIR locally on build box (which has AWS CLI)
+    log_info "Downloading pre-built RMIR to build box..."
+    mkdir -p /tmp/riva-deploy
+    aws s3 cp "$S3_RMIR" /tmp/riva-deploy/conformer-ctc-xl-streaming.rmir
+    log_success "✅ Downloaded to /tmp/riva-deploy/"
+
+    # Copy to GPU worker via SCP
+    log_info "Copying RMIR to GPU worker..."
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no ubuntu@"$GPU_INSTANCE_IP" "mkdir -p ~/conformer-ctc-deploy"
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no /tmp/riva-deploy/conformer-ctc-xl-streaming.rmir ubuntu@"$GPU_INSTANCE_IP":~/conformer-ctc-deploy/
+    log_success "✅ Copied to GPU worker"
 else
     log_info "⚠️  Pre-built RMIR not found - will build from source"
     USE_PREBUILT=false
@@ -53,7 +64,7 @@ fi
 # Deploy to GPU worker
 log_info "Deploying to GPU worker via SSH..."
 
-ssh -i "$SSH_KEY" ubuntu@"$GPU_INSTANCE_IP" "NGC_API_KEY='$NGC_API_KEY' S3_RMIR='$S3_RMIR' S3_SOURCE='$S3_SOURCE' USE_PREBUILT='$USE_PREBUILT'" 'bash -s' << 'REMOTE_SCRIPT'
+ssh -i "$SSH_KEY" ubuntu@"$GPU_INSTANCE_IP" "USE_PREBUILT='$USE_PREBUILT'" 'bash -s' << 'REMOTE_SCRIPT'
 set -euo pipefail
 
 echo "========================================="
@@ -65,11 +76,13 @@ cd ~
 mkdir -p conformer-ctc-deploy
 cd conformer-ctc-deploy
 
-# Get the RMIR (either download or build)
+# Get the RMIR (either use pre-copied or build)
 if [ "$USE_PREBUILT" = "true" ]; then
-    echo "📥 Downloading pre-built RMIR from S3..."
-    aws s3 cp "$S3_RMIR" conformer-ctc-xl-streaming.rmir
-    echo "✅ Downloaded"
+    echo "✅ Using pre-built RMIR (already copied)"
+    if [ ! -f conformer-ctc-xl-streaming.rmir ]; then
+        echo "❌ ERROR: RMIR file not found in ~/conformer-ctc-deploy/"
+        exit 1
+    fi
 else
     echo "🔨 Building Conformer-CTC with correct streaming parameters..."
     echo "This will take ~2 minutes"

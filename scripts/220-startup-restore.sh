@@ -3,7 +3,7 @@ set -euo pipefail
 exec > >(tee -a "logs/$(basename $0 .sh)-$(date +%Y%m%d-%H%M%S).log") 2>&1
 
 # ============================================================================
-# Script 220: Startup GPU and Restore Working State
+# Script 220: Startup GPU and Restore WhisperLive
 # ============================================================================
 # Complete one-command restoration of WhisperLive streaming setup.
 # Run this after shutting down the GPU to save costs.
@@ -13,17 +13,17 @@ exec > >(tee -a "logs/$(basename $0 .sh)-$(date +%Y%m%d-%H%M%S).log") 2>&1
 # 2. Waits for instance to be ready
 # 3. Queries AWS for current IP (IP changes on every stop/start)
 # 4. If IP changed, updates ALL config files:
-#    - .env (GPU_INSTANCE_IP, RIVA_HOST)
+#    - .env (GPU_INSTANCE_IP, GPU_HOST)
 #    - .env-http (DOMAIN, GPU_HOST)
 # 5. If IP changed, updates AWS security groups
 # 6. If IP changed, recreates Docker containers (Caddy) to load new IP
 # 7. Verifies SSH connectivity
 # 8. Checks WhisperLive service status
-# 9. Deploys WhisperLive if needed
-# 10. Runs full health check
+# 9. Deploys WhisperLive if needed (calls 310-configure-whisperlive-gpu.sh)
+# 10. Ensures WhisperLive service is running
 #
 # Architecture: Instance ID is source of truth, IP is resolved at startup
-# Total time: 5-10 minutes (2min startup + 3-8min deployment if needed)
+# Total time: 3-5 minutes (2min startup + 1-3min deployment if needed)
 # ============================================================================
 
 source "$(dirname "$0")/riva-common-functions.sh"
@@ -50,9 +50,9 @@ if [ -z "${GPU_INSTANCE_ID:-}" ]; then
 fi
 
 REGION="${AWS_REGION:-us-east-2}"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/dbm-sep23-2025.pem}"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/${SSH_KEY_NAME}.pem}"
 
-log_info "🚀 Starting GPU and restoring Conformer-CTC streaming"
+log_info "🚀 Starting GPU and restoring WhisperLive streaming"
 log_info "Instance: $GPU_INSTANCE_ID"
 echo ""
 
@@ -126,11 +126,12 @@ if [ "$CURRENT_IP" != "$OLD_IP" ]; then
 
   # Update .env
   sed -i "s/^GPU_INSTANCE_IP=.*/GPU_INSTANCE_IP=$CURRENT_IP/" .env
-  sed -i "s/^RIVA_HOST=.*/RIVA_HOST=$CURRENT_IP/" .env
 
-  # Also update GPU_HOST in main .env if it exists
+  # Update GPU_HOST in main .env (create if doesn't exist)
   if grep -q "^GPU_HOST=" .env 2>/dev/null; then
     sed -i "s/^GPU_HOST=.*/GPU_HOST=$CURRENT_IP/" .env
+  else
+    echo "GPU_HOST=$CURRENT_IP" >> .env
   fi
   log_success "  ✅ .env updated"
 
@@ -159,7 +160,7 @@ if [ "$CURRENT_IP" != "$OLD_IP" ]; then
 
   log_info "Step 2/5: Exporting environment variables..."
   export GPU_INSTANCE_IP="$CURRENT_IP"
-  export RIVA_HOST="$CURRENT_IP"
+  export GPU_HOST="$CURRENT_IP"
   log_success "✅ Variables exported for child scripts"
 
   log_info "Step 3/5: Reloading .env configuration..."
@@ -229,67 +230,74 @@ fi
 echo ""
 
 # ============================================================================
-# Step 4: Check if RIVA Server is Running
+# Step 4: Check if WhisperLive Server is Running
 # ============================================================================
-log_info "Step 4/6: Checking RIVA server status..."
+log_info "Step 4/6: Checking WhisperLive server status..."
 
-RIVA_READY=$(ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" \
-  'curl -sf http://localhost:8000/v2/health/ready && echo READY || echo NOT_READY' 2>/dev/null || echo "NOT_READY")
+WHISPER_READY=$(ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" \
+  'curl -sf http://localhost:9090/health && echo READY || echo NOT_READY' 2>/dev/null || echo "NOT_READY")
 
-if [ "$RIVA_READY" = "READY" ]; then
-  log_success "✅ RIVA server already running and ready"
+if [ "$WHISPER_READY" = "READY" ]; then
+  log_success "✅ WhisperLive server already running and ready"
+  NEEDS_DEPLOY=false
+else
+  log_warn "⚠️  WhisperLive server not running"
+  log_info "Checking if WhisperLive is installed..."
 
-  # Verify correct model is loaded
-  log_info "Verifying Conformer-CTC model is loaded..."
-  MODEL_CHECK=$(ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" \
-    'curl -s -X POST http://localhost:8000/v2/repository/index -H "Content-Type: application/json" -d "{}" | grep -c "conformer-ctc-xl-en-us-streaming"' || echo "0")
+  WHISPER_INSTALLED=$(ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" \
+    'systemctl is-enabled whisperlive 2>/dev/null && echo INSTALLED || echo NOT_INSTALLED')
 
-  if [ "$MODEL_CHECK" -gt "0" ]; then
-    log_success "✅ Conformer-CTC model loaded"
+  if [ "$WHISPER_INSTALLED" = "INSTALLED" ]; then
+    log_info "WhisperLive installed, just needs restart"
     NEEDS_DEPLOY=false
+    NEEDS_RESTART=true
   else
-    log_warn "⚠️  Conformer-CTC model not loaded, will deploy"
+    log_warn "WhisperLive not installed, will deploy"
     NEEDS_DEPLOY=true
   fi
-else
-  log_warn "⚠️  RIVA server not running, will deploy"
-  NEEDS_DEPLOY=true
 fi
 
 echo ""
 
 # ============================================================================
-# Step 5: Deploy Conformer-CTC if Needed
+# Step 5: Deploy WhisperLive if Needed
 # ============================================================================
 if [ "$NEEDS_DEPLOY" = "true" ]; then
-  log_info "Step 5/6: Deploying Conformer-CTC streaming model..."
-  log_info "This will take 5-10 minutes..."
+  log_info "Step 5/6: Deploying WhisperLive..."
+  log_info "This will take 3-5 minutes..."
   echo ""
 
-  # Run deployment script
-  "$(dirname "$0")/110-deploy-conformer-streaming.sh"
+  # Run WhisperLive deployment script
+  "$(dirname "$0")/310-configure-whisperlive-gpu.sh"
 
-  log_success "✅ Deployment complete"
+  log_success "✅ WhisperLive deployment complete"
 else
-  log_info "Step 5/6: Skipping deployment (already running)"
+  log_info "Step 5/6: Skipping deployment (already installed)"
 fi
 
 echo ""
 
 # ============================================================================
-# Step 6: Restart WebSocket Bridge
+# Step 6: Restart WhisperLive Service
 # ============================================================================
-log_info "Step 6/6: Restarting WebSocket bridge..."
-sudo systemctl restart riva-websocket-bridge
-sleep 3
+log_info "Step 6/6: Ensuring WhisperLive service is running..."
 
-BRIDGE_STATUS=$(sudo systemctl is-active riva-websocket-bridge || echo "inactive")
-if [ "$BRIDGE_STATUS" = "active" ]; then
-  log_success "✅ WebSocket bridge running"
+if [ "${NEEDS_RESTART:-false}" = "true" ] || [ "$NEEDS_DEPLOY" = "true" ]; then
+  ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" 'sudo systemctl restart whisperlive'
+  sleep 5
+
+  WHISPER_STATUS=$(ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" \
+    'systemctl is-active whisperlive' || echo "inactive")
+
+  if [ "$WHISPER_STATUS" = "active" ]; then
+    log_success "✅ WhisperLive service running"
+  else
+    log_error "❌ WhisperLive service failed to start"
+    ssh -i "$SSH_KEY" ubuntu@"$CURRENT_IP" 'sudo journalctl -u whisperlive -n 20 --no-pager'
+    exit 1
+  fi
 else
-  log_error "❌ WebSocket bridge failed to start"
-  sudo journalctl -u riva-websocket-bridge -n 20 --no-pager
-  exit 1
+  log_success "✅ WhisperLive already running"
 fi
 
 echo ""
@@ -304,9 +312,7 @@ echo ""
 log_info "📊 Status Summary:"
 echo "  GPU Instance: $GPU_INSTANCE_ID"
 echo "  GPU IP: $CURRENT_IP"
-echo "  RIVA Server: READY (http://$CURRENT_IP:8000)"
-echo "  WebSocket Bridge: RUNNING (wss://${BUILDBOX_PUBLIC_IP:-3.16.124.227}:${APP_PORT:-8443})"
-echo "  HTTPS Demo: https://${BUILDBOX_PUBLIC_IP:-3.16.124.227}:${DEMO_PORT:-8444}/demo.html"
+echo "  WhisperLive Server: READY (http://$CURRENT_IP:9090)"
 echo ""
 log_info "🧪 Test it now:"
 echo "  1. Open: https://${BUILDBOX_PUBLIC_IP:-3.16.124.227}:${DEMO_PORT:-8444}/demo.html"
@@ -314,7 +320,7 @@ echo "  2. Click 'Start Transcription'"
 echo "  3. Speak into microphone"
 echo "  4. See real-time transcriptions"
 echo ""
-log_info "📝 Check logs:"
-echo "  sudo journalctl -u riva-websocket-bridge -f"
+log_info "📝 Check WhisperLive logs:"
+echo "  ssh -i ~/.ssh/${SSH_KEY_NAME}.pem ubuntu@$CURRENT_IP 'sudo journalctl -u whisperlive -f'"
 echo ""
-log_success "🎉 You're back in business!"
+log_success "🎉 WhisperLive is ready for transcription!"
