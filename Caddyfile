@@ -15,6 +15,11 @@ https:// {
     handle {
         root * /srv
         file_server browse
+
+        # Prevent browser caching of index.html (for development)
+        header /index.html Cache-Control "no-cache, no-store, must-revalidate"
+        header /index.html Pragma "no-cache"
+        header /index.html Expires "0"
     }
 
     log {
