@@ -568,7 +568,7 @@
                     this.lastPartialTokens = curr.slice();
                     this._resetStability(curr.length, now);
                     this._alignCurrWithTail(curr); // in case acc already has content
-                    return;
+                    return { slideDetected: false };
                 }
 
                 // 0) Soft-tail alignment/rewind if upstream refined within tail
@@ -621,21 +621,31 @@
                 // 2) EW — detect true slide and rescue remainder
                 const slide = this._detectSlide(this.lastPartialTokens, curr, now);
                 if (slide && this.workingTokens.length >= this.cfg.beta) {
-                    if (!this._recentTailDuplicate(this.workingTokens)) {
-                        const disp = this._detok(this.workingTokens);
-                        this._appendToAccumulated(this.workingTokens, disp);
-                        if (this.cfg.debug) console.log(`[EW] RESCUED remainder: "${disp}" (len=${this.workingTokens.length})`);
+                    // Apply BoF-style deduplication: check for overlap with tail before appending
+                    const overlapK = this._maxPrefixOverlapWithTail(this.workingTokens, this.accTokens, this.cfg.finalAlignW);
+                    const remainder = this.workingTokens.slice(overlapK);
+
+                    let rescuedText = '';
+                    if (remainder.length > 0 && !this._recentTailDuplicate(remainder)) {
+                        const disp = this._detok(remainder);
+                        rescuedText = disp;
+                        this._appendToAccumulated(remainder, disp, true);  // true = add line break for slide
+                        if (this.cfg.debug) console.log(`[EW] RESCUED remainder: "${disp}" (len=${remainder.length}, dropped=${overlapK})`);
+                    } else {
+                        if (this.cfg.debug) console.log(`[EW] Skipped duplicate slide rescue (overlap=${overlapK}, len=${this.workingTokens.length})`);
                     }
+
                     // reset working to curr
                     this.workingTokens = curr.slice();
                     this.workingOrig = text;
                     this._resetStability(this.workingTokens.length, now);
 
-                    const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
-                    if (desiredHard > this.hardCommitted) this.hardCommitted = desiredHard;
+                    // Treat slide as final - hard-commit everything to prevent duplicates
+                    this.hardCommitted = this.accTokens.length;
+                    if (this.cfg.debug) console.log(`[EW] Hard-committed on slide (like final)`);
 
                     this.lastPartialTokens = curr.slice();
-                    return;
+                    return { slideDetected: true, rescuedText: rescuedText };
                 }
 
                 // 3) refinement path: mirror curr
@@ -643,6 +653,7 @@
                 this.workingOrig = text;
                 this._ensureStabilityLength(this.workingTokens.length, now);
                 this.lastPartialTokens = curr.slice();
+                return { slideDetected: false };
             }
 
             ingestFinal(text) {
@@ -655,7 +666,7 @@
                 }
                 if (!this._recentTailDuplicate(remainder)) {
                     const disp = this._detok(remainder);
-                    this._appendToAccumulated(remainder, disp);
+                    this._appendToAccumulated(remainder, disp, true);  // true = add line break for final
                     if (this.cfg.debug) console.log(`[BoF] Added final: "${disp}"`);
                 }
 
@@ -699,6 +710,19 @@
                 console.log('[Accumulator] Reset for new session');
             }
 
+            flushWorking() {
+                // Commit any remaining working tokens as a final when recording stops
+                if (this.workingTokens.length > 0) {
+                    const text = this.workingOrig.trim();
+                    if (text) {
+                        if (this.cfg.debug) console.log(`[FLUSH] Finalizing working remainder: "${text.substring(0, 50)}"`);
+                        this.ingestFinal(text);
+                        return text;
+                    }
+                }
+                return '';
+            }
+
             /* === Backwards Compatibility Aliases === */
             getPreviewText() { return this.getTranscriptWithCurrent(); }
             getFullText() { return this.getTranscript(); }
@@ -706,11 +730,31 @@
             /* === Internals === */
 
             _normalize(s) {
-                return String(s)
+                // Number word to digit mapping
+                const numberWords = {
+                    'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+                    'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+                    'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13',
+                    'fourteen': '14', 'fifteen': '15', 'sixteen': '16', 'seventeen': '17',
+                    'eighteen': '18', 'nineteen': '19', 'twenty': '20', 'thirty': '30',
+                    'forty': '40', 'fifty': '50', 'sixty': '60', 'seventy': '70',
+                    'eighty': '80', 'ninety': '90', 'hundred': '100', 'thousand': '1000'
+                };
+
+                let normalized = String(s)
                     .toLowerCase()
                     .replace(/[""]/g, '"')
                     .replace(/['']/g, "'")
                     .replace(/[^\p{L}\p{N}\s'".,!?-]+/gu, " ")
+                    .replace(/[,\.!?;:'"-]/g, '');  // Strip punctuation for comparison
+
+                // Replace number words with digits
+                Object.keys(numberWords).forEach(word => {
+                    const regex = new RegExp(`\\b${word}\\b`, 'g');
+                    normalized = normalized.replace(regex, numberWords[word]);
+                });
+
+                return normalized
                     .replace(/\s+/g, " ")
                     .trim();
             }
@@ -802,11 +846,17 @@
                 return true;
             }
 
-            _appendToAccumulated(tokens, display) {
+            _appendToAccumulated(tokens, display, isFromFinal = false) {
                 if (tokens.length === 0) return;
-                const space = this.accText.length ? " " : "";
-                this.accText = `${this.accText}${space}${display}`.trim();
+                // Use line break for finals/slides, space for normal commits
+                const separator = isFromFinal ? "\n" : " ";
+                const sep = this.accText.length ? separator : "";
+                this.accText = `${this.accText}${sep}${display}`.trim();
                 this.accTokens.push(...tokens);
+
+                if (this.cfg.debug) {
+                    console.log(`[APPEND] isFromFinal=${isFromFinal}, text="${display.substring(0, 30)}", accText has ${(this.accText.match(/\n/g) || []).length} newlines`);
+                }
 
                 // Enforce soft tail policy
                 const desiredHard = Math.max(0, this.accTokens.length - this.cfg.softTailTokens);
@@ -863,10 +913,10 @@
             minPrefixLength: 3,      // SPC: min 3 tokens to commit
             stabilityTimeMs: 1000,   // SPC: or 1 second
             overlapWindow: 8,        // EW: 8-token window
-            slideThreshold: 0.4,     // EW: LCP ratio < 0.4 = slide
-            minSlideLength: 3,       // EW: min 3 tokens to rescue (was 5, too strict)
-            hysteresisFrames: 1,     // EW: 1 frame (immediate rescue)
-            cooldownMs: 200,         // EW: 200ms cooldown
+            slideThreshold: 0.95,    // EW: LCP ratio < 0.95 = slide (VERY STRICT - almost never triggers)
+            minSlideLength: 200,     // EW: min 200 tokens to rescue (require huge buffer)
+            hysteresisFrames: 10,    // EW: 10 consecutive frames needed
+            cooldownMs: 60000,       // EW: 60 second cooldown between slides
             alignWindow: 10          // BoF: 10-token alignment
         });
 
@@ -908,6 +958,8 @@
         let mediaStream = null;
         let processor = null;
         let isRecording = false;
+        let lastSegmentEnd = 0;  // Track segment timestamps for overflow detection
+        let lastCommittedTimestamp = 0;  // Track highest committed final timestamp for deduplication
 
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
@@ -941,12 +993,17 @@
         let displayedFinals = new Set();  // Track displayed finals to prevent UI duplicates
 
         function updateTranscriptPreview() {
-            // Get preview text from accumulator (committed + working remainder)
-            const previewText = transcriptAccumulator.getPreviewText();
+            // Get COMMITTED ONLY text from accumulator (no working remainder)
+            // This prevents rolling duplicates in the AI assistant panel
+            const committedText = transcriptAccumulator.getTranscript();
 
-            if (previewText.trim()) {
+            if (committedText.trim()) {
                 transcriptPreview.classList.remove('empty');
-                transcriptPreview.textContent = previewText;
+                // Convert newlines to <br> tags for HTML display
+                const newlineCount = (committedText.match(/\n/g) || []).length;
+                console.log(`📝 AI Assistant update: ${newlineCount} newlines found in committed text`);
+                const htmlText = committedText.replace(/\n/g, '<br><br>');  // Double BR for better visibility
+                transcriptPreview.innerHTML = htmlText;
             } else {
                 transcriptPreview.classList.add('empty');
                 transcriptPreview.innerHTML = '<p>Transcript will appear here...</p><p style="margin-top: 10px; font-size: 12px;">You can copy or download the full transcript to use with Claude or other AI tools.</p>';
@@ -959,7 +1016,13 @@
         function addTranscript(text, isFinal = false) {
             if (!text || !text.trim()) return;
 
-            // Feed text to accumulator (SPC + EW + BoF logic)
+            // Remove "Click Start" message if present
+            if (transcriptBox.children.length === 1 &&
+                transcriptBox.children[0].style.color === 'rgb(156, 163, 175)') {
+                transcriptBox.innerHTML = '';
+            }
+
+            // === HANDLE ACTUAL FINALS (from WhisperLive completed flag) ===
             if (isFinal) {
                 transcriptAccumulator.ingestFinal(text);
 
@@ -971,17 +1034,79 @@
                     return;
                 }
                 displayedFinals.add(normalized);
-            } else {
-                transcriptAccumulator.ingestPartial(text);
+
+                // Display as Final
+                const entry = document.createElement('div');
+                entry.className = 'transcript-entry final';
+
+                const label = document.createElement('div');
+                label.className = 'transcript-label';
+                label.textContent = 'Final';
+
+                const textDiv = document.createElement('div');
+                textDiv.className = 'transcript-text';
+                textDiv.textContent = text;
+
+                entry.appendChild(label);
+                entry.appendChild(textDiv);
+                transcriptBox.appendChild(entry);
+
+                updateTranscriptPreview();
+                transcriptBox.scrollTop = transcriptBox.scrollHeight;
+                return;
             }
 
-            // Update UI: Display transcript entry in left pane
+            // === HANDLE PARTIALS ===
+            const result = transcriptAccumulator.ingestPartial(text);
+
+            // If slide was detected, display rescued text as Final + current as new Partial
+            if (result.slideDetected && result.rescuedText && result.rescuedText.trim()) {
+                console.log('🔄 Window slide detected! Rescued:', result.rescuedText.substring(0, 50), '| Current:', text.substring(0, 50));
+
+                // 1. Display rescued text as Final (green border)
+                const finalEntry = document.createElement('div');
+                finalEntry.className = 'transcript-entry final';
+
+                const finalLabel = document.createElement('div');
+                finalLabel.className = 'transcript-label';
+                finalLabel.textContent = 'Final';
+
+                const finalTextDiv = document.createElement('div');
+                finalTextDiv.className = 'transcript-text';
+                finalTextDiv.textContent = result.rescuedText;
+
+                finalEntry.appendChild(finalLabel);
+                finalEntry.appendChild(finalTextDiv);
+                transcriptBox.appendChild(finalEntry);
+
+                // 2. Display current text as new Partial (gray border, will flicker)
+                const partialEntry = document.createElement('div');
+                partialEntry.className = 'transcript-entry partial';
+
+                const partialLabel = document.createElement('div');
+                partialLabel.className = 'transcript-label';
+                partialLabel.textContent = 'Partial';
+
+                const partialTextDiv = document.createElement('div');
+                partialTextDiv.className = 'transcript-text';
+                partialTextDiv.textContent = text;
+
+                partialEntry.appendChild(partialLabel);
+                partialEntry.appendChild(partialTextDiv);
+                transcriptBox.appendChild(partialEntry);
+
+                updateTranscriptPreview();
+                transcriptBox.scrollTop = transcriptBox.scrollHeight;
+                return; // DONE - don't create more entries
+            }
+
+            // Normal partial (no slide) - replace last partial or append new
             const entry = document.createElement('div');
-            entry.className = `transcript-entry ${isFinal ? 'final' : 'partial'}`;
+            entry.className = 'transcript-entry partial';
 
             const label = document.createElement('div');
             label.className = 'transcript-label';
-            label.textContent = isFinal ? 'Final' : 'Partial';
+            label.textContent = 'Partial';
 
             const textDiv = document.createElement('div');
             textDiv.className = 'transcript-text';
@@ -990,24 +1115,14 @@
             entry.appendChild(label);
             entry.appendChild(textDiv);
 
-            // Remove "Click Start" message if present
-            if (transcriptBox.children.length === 1 &&
-                transcriptBox.children[0].style.color === 'rgb(156, 163, 175)') {
-                transcriptBox.innerHTML = '';
-            }
-
-            // Replace last partial or add new
-            if (!isFinal && transcriptBox.lastChild &&
-                transcriptBox.lastChild.classList.contains('partial')) {
+            // Replace last partial if it exists, otherwise append
+            if (transcriptBox.lastChild && transcriptBox.lastChild.classList.contains('partial')) {
                 transcriptBox.replaceChild(entry, transcriptBox.lastChild);
             } else {
                 transcriptBox.appendChild(entry);
             }
 
-            // Update preview (AI Assistant panel)
             updateTranscriptPreview();
-
-            // Auto-scroll both panels
             transcriptBox.scrollTop = transcriptBox.scrollHeight;
         }
 
@@ -1018,6 +1133,8 @@
                 fullTranscript = [];
                 displayedFinals.clear();  // Reset displayed finals tracking
                 transcriptAccumulator.reset();  // Reset SPC + EW + BoF state
+                lastSegmentEnd = 0;  // Reset timestamp tracking
+                lastCommittedTimestamp = 0;  // Reset committed timestamp for deduplication
 
                 setStatus('connecting', 'Connecting to server...');
 
@@ -1085,28 +1202,57 @@
 
                         // WhisperLive sends segments array
                         if (data.segments && data.segments.length > 0) {
-                            // Concatenate all segment texts
-                            const fullText = data.segments.map(s => s.text || '').join('');
+                            // Process each segment individually
+                            for (const segment of data.segments) {
+                                const text = segment.text || '';
+                                const start = parseFloat(segment.start || 0);
+                                const end = parseFloat(segment.end || 0);
+                                const isFinal = segment.completed === true;
 
-                            // Check if last segment is final
-                            const lastSegment = data.segments[data.segments.length - 1];
-                            const isFinal = lastSegment.completed === true;
+                                // VERBOSE LOGGING for debugging
+                                console.log('📊 Segment:', {
+                                    start: start.toFixed(3),
+                                    end: end.toFixed(3),
+                                    duration: (end - start).toFixed(3),
+                                    text: text.substring(0, 50),
+                                    completed: isFinal,
+                                    gap: lastSegmentEnd > 0 ? (start - lastSegmentEnd).toFixed(3) : 'N/A'
+                                });
 
-                            // VERBOSE LOGGING for debugging
-                            console.log('📊 Segment Details:', {
-                                segmentCount: data.segments.length,
-                                fullText: fullText.substring(0, 80),
-                                isFinal: isFinal,
-                                lastSegment: {
-                                    text: lastSegment.text?.substring(0, 50),
-                                    completed: lastSegment.completed,
-                                    type: typeof lastSegment.completed
-                                },
-                                allCompletedFlags: data.segments.map(s => s.completed)
-                            });
+                                // Detect buffer overflow by time regression or large gap
+                                if (lastSegmentEnd > 0) {
+                                    const gap = start - lastSegmentEnd;
+                                    if (gap < -1.0) {
+                                        console.warn(`⚠️ TIME REGRESSION: ${gap.toFixed(3)}s - Buffer overflow detected!`);
+                                    } else if (gap > 2.0) {
+                                        console.warn(`⚠️ TIME GAP: ${gap.toFixed(3)}s - Possible data loss!`);
+                                    }
+                                }
 
-                            if (fullText.trim()) {
-                                addTranscript(fullText, isFinal);
+                                // Update last segment end time
+                                if (end > lastSegmentEnd) {
+                                    lastSegmentEnd = end;
+                                }
+
+                                // DEDUPLICATION: Skip finals we've already committed
+                                // WhisperLive re-sends completed segments in every message,
+                                // so we track the highest committed timestamp and skip segments
+                                // with end <= lastCommittedTimestamp
+                                if (isFinal && end <= lastCommittedTimestamp) {
+                                    console.log(`⏭️ Skipping duplicate final (end=${end.toFixed(3)}s <= last=${lastCommittedTimestamp.toFixed(3)}s): "${text.substring(0, 30)}"`);
+                                    continue;
+                                }
+
+                                // Process segment
+                                if (text.trim()) {
+                                    addTranscript(text, isFinal);
+
+                                    // Update committed timestamp after processing final
+                                    if (isFinal && end > lastCommittedTimestamp) {
+                                        lastCommittedTimestamp = end;
+                                        console.log(`✅ Committed final up to ${end.toFixed(3)}s`);
+                                    }
+                                }
                             }
                         } else if (data.message === 'SERVER_READY') {
                             console.log('WhisperLive ready');
@@ -1142,6 +1288,31 @@
 
         function stopRecording() {
             isRecording = false;
+
+            // Flush any remaining partial to final
+            console.log('🛑 Stopping recording - flushing remaining partial...');
+            const flushedText = transcriptAccumulator.flushWorking();
+            if (flushedText) {
+                // Display flushed text as Final in left panel
+                const finalEntry = document.createElement('div');
+                finalEntry.className = 'transcript-entry final';
+
+                const finalLabel = document.createElement('div');
+                finalLabel.className = 'transcript-label';
+                finalLabel.textContent = 'Final';
+
+                const finalTextDiv = document.createElement('div');
+                finalTextDiv.className = 'transcript-text';
+                finalTextDiv.textContent = flushedText;
+
+                finalEntry.appendChild(finalLabel);
+                finalEntry.appendChild(finalTextDiv);
+                transcriptBox.appendChild(finalEntry);
+
+                // Update AI assistant
+                updateTranscriptPreview();
+                transcriptBox.scrollTop = transcriptBox.scrollHeight;
+            }
 
             if (processor) {
                 processor.disconnect();
