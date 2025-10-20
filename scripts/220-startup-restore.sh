@@ -183,6 +183,12 @@ if [ "$CURRENT_IP" != "$OLD_IP" ]; then
     log_info "  Stopping Caddy container..."
     docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
 
+    # Force remove if still exists (handles stale containers)
+    if docker ps -a --format '{{.Names}}' | grep -q "whisperlive-edge"; then
+      log_info "  Force removing stale Caddy container..."
+      docker rm -f whisperlive-edge || true
+    fi
+
     log_info "  Starting Caddy with updated GPU IP..."
     if docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null; then
       log_success "  ✅ Caddy container recreated"
