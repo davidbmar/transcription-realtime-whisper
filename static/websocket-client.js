@@ -10,7 +10,7 @@ class TranscriptionWebSocket {
         const protocol = window.location.protocol;
         const hostname = window.location.hostname;
         const port = window.location.port;
-        
+
         let wsProtocol, wsPort;
         if (protocol === 'https:') {
             wsProtocol = 'wss:';  // Use WSS for HTTPS pages
@@ -19,13 +19,14 @@ class TranscriptionWebSocket {
             wsProtocol = 'ws:';
             wsPort = port || '8443';
         }
-        
+
         // Always include the WebSocket port since we're using a custom port
         const hostWithPort = `${hostname}:${wsPort}`;
-        
+
         this.url = options.url || `${wsProtocol}//${hostWithPort}/ws/transcribe`;
+        this.apiKey = options.apiKey || null;  // Optional API key for authentication
         this.clientId = options.clientId || `client_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        
+
         console.log(`WebSocket URL: ${this.url}`);
         console.log(`Client ID: ${this.clientId}`);
         
@@ -50,10 +51,15 @@ class TranscriptionWebSocket {
     async connect() {
         try {
             console.log('Connecting to WebSocket...');
-            
-            // Add client ID to URL
-            const urlWithClient = `${this.url}?client_id=${this.clientId}`;
-            this.ws = new WebSocket(urlWithClient);
+
+            // Build URL with client ID and optional API key
+            let urlWithParams = `${this.url}?client_id=${this.clientId}`;
+            if (this.apiKey) {
+                urlWithParams += `&api_key=${this.apiKey}`;
+                console.log('🔐 Using API key authentication');
+            }
+
+            this.ws = new WebSocket(urlWithParams);
             
             this.ws.onopen = () => {
                 console.log('✅ WebSocket connected');
@@ -66,7 +72,7 @@ class TranscriptionWebSocket {
                     type: 'config',
                     config: {
                         sample_rate: 16000,
-                        encoding: 'pcm16',
+                        encoding: 'float32',  // WhisperLive expects Float32, not PCM16
                         language: 'en'
                     }
                 });
@@ -199,17 +205,12 @@ class TranscriptionWebSocket {
             
             this.processor.onaudioprocess = (event) => {
                 if (!this.isRecording) return;
-                
+
+                // getChannelData returns Float32Array - WhisperLive expects this format!
                 const inputData = event.inputBuffer.getChannelData(0);
-                
-                // Convert to 16-bit PCM
-                const pcmData = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
-                }
-                
-                // Send audio data
-                this.sendAudio(pcmData.buffer);
+
+                // Send Float32 audio data directly (NO conversion to PCM16)
+                this.sendAudio(inputData.buffer);
             };
             
             source.connect(this.processor);

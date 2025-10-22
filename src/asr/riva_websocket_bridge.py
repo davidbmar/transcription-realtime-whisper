@@ -96,6 +96,9 @@ class WebSocketConfig:
     deduplication_enabled: bool = os.getenv("DEDUPLICATION_ENABLED", "true").lower() == "true"
     deduplication_window_size: int = int(os.getenv("DEDUPLICATION_WINDOW_SIZE", "30"))
 
+    # Authentication (optional - if not set, authentication is disabled)
+    api_key: Optional[str] = os.getenv("WS_API_KEY")  # Enable auth by setting this in .env
+
     # Logging
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
@@ -279,9 +282,56 @@ class RivaWebSocketBridge:
             logger.error(f"Failed to load SSL certificates: {e}")
             raise
 
+    def _validate_api_key(self, websocket: WebSocketServerProtocol, path: str) -> bool:
+        """
+        Validate API key from query params or headers.
+        Returns True if authentication passes or is disabled, False otherwise.
+        """
+        # If no API key configured, authentication is disabled
+        if not self.config.api_key:
+            logger.debug("API key authentication disabled (WS_API_KEY not set)")
+            return True
+
+        # Parse query parameters from path
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(path)
+        query_params = parse_qs(parsed.query)
+
+        # Check for API key in query params
+        client_api_key = query_params.get('api_key', [None])[0]
+
+        # Also check request headers if available
+        if not client_api_key and hasattr(websocket, 'request_headers'):
+            # Check Authorization header (Bearer token style)
+            auth_header = websocket.request_headers.get('Authorization', '')
+            if auth_header.startswith('Bearer '):
+                client_api_key = auth_header[7:]  # Remove "Bearer " prefix
+            # Check X-API-Key header
+            elif 'X-API-Key' in websocket.request_headers:
+                client_api_key = websocket.request_headers.get('X-API-Key')
+
+        # Validate API key
+        if client_api_key == self.config.api_key:
+            logger.info(f"✅ API key authentication successful from {websocket.remote_address}")
+            return True
+        else:
+            logger.warning(f"❌ API key authentication failed from {websocket.remote_address}")
+            return False
+
     async def handle_connection(self, websocket: WebSocketServerProtocol, path: str):
         """Handle incoming WebSocket connection"""
         logger.info(f"NEW CONNECTION: Remote address: {websocket.remote_address}, Path: {path}")
+
+        # Authenticate connection
+        if not self._validate_api_key(websocket, path):
+            logger.warning(f"Rejecting connection from {websocket.remote_address} - invalid API key")
+            await websocket.send(json.dumps({
+                'type': 'error',
+                'error': 'Authentication failed: Invalid API key',
+                'timestamp': datetime.utcnow().isoformat()
+            }))
+            await websocket.close(1008, "Unauthorized")
+            return
 
         connection_id = await self.connection_manager.add_connection(websocket)
         logger.info(f"DEBUG: Connection {connection_id} added successfully")

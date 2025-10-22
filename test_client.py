@@ -7,15 +7,35 @@ import asyncio
 import websockets
 import json
 import sys
-import wave
-import struct
+import os
+from pathlib import Path
 
-GPU_HOST = "3.138.85.115"
-GPU_PORT = 9090
+# Load environment variables
+try:
+    from dotenv import load_dotenv
+    # Try to find .env file in current dir or parent dirs
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+    else:
+        load_dotenv()  # Will search parent directories
+except ImportError:
+    print("⚠️  python-dotenv not installed, falling back to environment variables")
+    print("   Install with: pip install python-dotenv")
+
+# Load GPU host/port from environment (no more hardcoded IPs!)
+GPU_HOST = os.getenv("GPU_HOST", os.getenv("GPU_INSTANCE_IP", "localhost"))
+GPU_PORT = int(os.getenv("GPU_PORT", "9090"))
+WS_API_KEY = os.getenv("WS_API_KEY")  # Optional API key for authentication
 
 async def test_whisperlive():
+    # Build URI with optional API key
     uri = f"ws://{GPU_HOST}:{GPU_PORT}"
-    print(f"Connecting to {uri}...")
+    if WS_API_KEY:
+        uri += f"?api_key={WS_API_KEY}"
+        print(f"🔐 Using API key authentication")
+
+    print(f"Connecting to {uri.split('?')[0]}...")
 
     try:
         async with websockets.connect(uri) as websocket:

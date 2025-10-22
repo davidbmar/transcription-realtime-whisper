@@ -34,6 +34,13 @@ log_error() {
     echo "❌ $1"
 }
 
+# Ensure logs directory exists (prevents script failures)
+# This is called automatically when this library is sourced
+if [[ ! -d "logs" ]]; then
+    mkdir -p logs
+    echo "📁 Created logs directory"
+fi
+
 log_execution_start() {
     local script_name="$1"
     local script_desc="$2"

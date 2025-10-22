@@ -1,11 +1,11 @@
 /**
  * Audio Recorder Module
  * Captures audio from microphone and prepares it for streaming
- * 
+ *
  * Features:
  * - WebAudio API for high-quality capture
  * - Automatic resampling to 16kHz
- * - PCM16 encoding for efficient transmission
+ * - Float32 PCM encoding (WhisperLive requirement)
  * - Configurable chunk size for streaming
  */
 
@@ -64,15 +64,15 @@ class AudioRecorder {
             // Process audio data
             this.processor.onaudioprocess = (e) => {
                 if (!this.isRecording) return;
-                
+
+                // getChannelData returns Float32Array - WhisperLive expects this format!
                 const inputData = e.inputBuffer.getChannelData(0);
-                const pcm16Data = this.float32ToPCM16(inputData);
-                
-                // Send audio chunk
+
+                // Send Float32 audio chunk directly (NO conversion to PCM16)
                 if (this.onAudioData) {
-                    this.onAudioData(pcm16Data.buffer);
+                    this.onAudioData(inputData.buffer);
                 }
-                
+
                 // Store for visualization/debugging
                 this.audioBuffer.push(inputData);
                 if (this.audioBuffer.length > 100) {
@@ -127,20 +127,23 @@ class AudioRecorder {
     }
     
     /**
-     * Convert Float32Array to PCM16 (Int16Array)
-     * @param {Float32Array} float32Array - Input audio data
-     * @returns {Int16Array} PCM16 encoded audio
+     * DEPRECATED: This method is no longer used.
+     * WhisperLive expects Float32 PCM, NOT PCM16.
+     * Keeping for reference only - do not use.
+     *
+     * @deprecated Use Float32Array directly instead
      */
     float32ToPCM16(float32Array) {
+        console.warn('float32ToPCM16 is deprecated - WhisperLive requires Float32, not PCM16');
         const int16Array = new Int16Array(float32Array.length);
-        
+
         for (let i = 0; i < float32Array.length; i++) {
             // Clamp to [-1, 1]
             let sample = Math.max(-1, Math.min(1, float32Array[i]));
             // Convert to 16-bit PCM
             int16Array[i] = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
         }
-        
+
         return int16Array;
     }
     
