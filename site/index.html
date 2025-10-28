@@ -156,18 +156,33 @@
       border-radius: var(--radius-md);
       padding: 12px;
       margin-top: 12px;
-      height: 250px;
-      overflow-y: auto;
+      height: 220px;
       font-size: 14px;
       line-height: 1.6;
-      scroll-behavior: smooth;
       display: flex;
       flex-direction: column;
+      gap: 8px;
     }
     .transcription-display.empty{
       color: var(--muted);
       text-align: center;
       font-style: italic;
+    }
+    .partial-section {
+      min-height: 50px;
+      padding: 8px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 6px;
+      border: 1px solid var(--stroke);
+    }
+    .completed-section {
+      flex: 1;
+      overflow-y: auto;
+      scroll-behavior: smooth;
+      padding: 8px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 6px;
+      border: 1px solid var(--stroke);
     }
     .transcript-entry{
       margin-bottom: 8px;
@@ -243,7 +258,7 @@
     }
     .waveform-canvas {
       width:100%;
-      height:96px;
+      height:60px;
       display:block;
     }
 
@@ -1410,12 +1425,24 @@
                                '<span>Chunks recorded: <strong id="chunk-count">0</strong></span>';
           recorderBody.appendChild(liveStats);
 
-          // Add transcription display
+          // Add transcription display with split sections
           transcriptDisplay = document.createElement('div');
           transcriptDisplay.id = 'transcription-display';
-          transcriptDisplay.className = 'transcription-display empty';
-          transcriptDisplay.innerHTML = '<div style="margin-bottom:6px;font-weight:600;color:var(--accent);">Live Transcription</div>' +
-                                       '<div style="opacity:0.7;">Transcription will appear here...</div>';
+          transcriptDisplay.className = 'transcription-display';
+
+          // Partial section (always visible at top)
+          var partialSection = document.createElement('div');
+          partialSection.className = 'partial-section';
+          partialSection.id = 'partial-section';
+          partialSection.innerHTML = '<div style="opacity:0.6;font-size:12px;">Listening...</div>';
+          transcriptDisplay.appendChild(partialSection);
+
+          // Completed section (scrollable)
+          var completedSection = document.createElement('div');
+          completedSection.className = 'completed-section';
+          completedSection.id = 'completed-section';
+          transcriptDisplay.appendChild(completedSection);
+
           recorderBody.appendChild(transcriptDisplay);
 
           startLiveWaveform();
@@ -1632,7 +1659,19 @@
 
         if (transcriptDisplay.classList.contains('empty')) {
           transcriptDisplay.classList.remove('empty');
-          transcriptDisplay.innerHTML = '<div style="margin-bottom:6px;font-weight:600;color:var(--accent);">Live Transcription</div>';
+          // Recreate the split sections structure
+          transcriptDisplay.innerHTML = '';
+
+          const partialSection = document.createElement('div');
+          partialSection.className = 'partial-section';
+          partialSection.id = 'partial-section';
+          partialSection.innerHTML = '<div style="opacity:0.6;font-size:12px;">Listening...</div>';
+          transcriptDisplay.appendChild(partialSection);
+
+          const completedSection = document.createElement('div');
+          completedSection.className = 'completed-section';
+          completedSection.id = 'completed-section';
+          transcriptDisplay.appendChild(completedSection);
         }
 
         if (isFinal) {
@@ -1683,45 +1722,45 @@
             console.log('✅ Stored word-level timestamps for segment:', words.length, 'words');
           }
 
-          transcriptDisplay.appendChild(entry);
-
-          // Auto-scroll to bottom to show newest transcription
-          transcriptDisplay.scrollTop = transcriptDisplay.scrollHeight;
+          // Append to completed section (scrollable)
+          const completedSection = document.getElementById('completed-section');
+          if (completedSection) {
+            completedSection.appendChild(entry);
+            // Auto-scroll completed section to bottom
+            completedSection.scrollTop = completedSection.scrollHeight;
+          }
 
           // Update all existing chunks with new transcription
           updateChunkTranscriptions();
         } else {
           const result = transcriptAccumulator.ingestPartial(text);
 
-          // Update or create partial entry
-          let partialEntry = transcriptDisplay.querySelector('.transcript-entry.partial');
-          if (!partialEntry) {
-            partialEntry = document.createElement('div');
-            partialEntry.className = 'transcript-entry partial';
-            transcriptDisplay.appendChild(partialEntry);
+          // Update partial section (always visible at top)
+          const partialSection = document.getElementById('partial-section');
+          if (partialSection) {
+            // Add timestamp for partials too
+            let content = '';
+            if (start !== undefined && end !== undefined) {
+              content = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;">${start.toFixed(2)}s → ${end.toFixed(2)}s</div>`;
+            }
+            content += `<div>${text}</div>`;
+            partialSection.innerHTML = content;
           }
-
-          // Add timestamp for partials too
-          let content = '';
-          if (start !== undefined && end !== undefined) {
-            content = `<div style="font-size:11px;color:var(--muted);margin-bottom:4px;">${start.toFixed(2)}s → ${end.toFixed(2)}s</div>`;
-          }
-          content += `<div>${text}</div>`;
-          partialEntry.innerHTML = content;
-
-          // Auto-scroll to bottom for partials too
-          transcriptDisplay.scrollTop = transcriptDisplay.scrollHeight;
 
           if (result.slideDetected && result.rescuedText) {
             // Create final entry for rescued text
             const rescuedEntry = document.createElement('div');
             rescuedEntry.className = 'transcript-entry final';
             rescuedEntry.textContent = result.rescuedText;
-            transcriptDisplay.insertBefore(rescuedEntry, partialEntry);
+
+            // Append to completed section
+            const completedSection = document.getElementById('completed-section');
+            if (completedSection) {
+              completedSection.appendChild(rescuedEntry);
+              completedSection.scrollTop = completedSection.scrollHeight;
+            }
           }
         }
-
-        transcriptDisplay.scrollTop = transcriptDisplay.scrollHeight;
       }
 
       // Helper: Calculate overlap percentage between chunk and segment
