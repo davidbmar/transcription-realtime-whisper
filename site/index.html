@@ -343,26 +343,24 @@
 
     <!-- Control Panel -->
     <div class="control-panel">
-      <div class="row">
-        <label style="display:flex;align-items:center;gap:8px;color:var(--muted);">Chunk length (ms):
-          <input id="timeslice" type="number" value="5000" min="500" step="500"
-                 style="background:rgba(255,255,255,0.08);border:1px solid var(--stroke);
-                        border-radius:8px;padding:6px 10px;color:var(--text);width:80px;" />
-        </label>
-        <label style="display:flex;align-items:center;gap:8px;color:var(--muted);">Overlap (ms):
-          <input id="overlap" type="number" value="500" min="0" max="2000" step="100"
-                 style="background:rgba(255,255,255,0.08);border:1px solid var(--stroke);
-                        border-radius:8px;padding:6px 10px;color:var(--text);width:80px;" />
-        </label>
-        <div class="spacer"></div>
-        <div id="storage-status" style="color:var(--muted);font-size:12px;">
-          Storage: Loading...
-        </div>
-      </div>
-      <div class="row" style="margin-top:10px">
+      <div class="row" style="flex-wrap:wrap;gap:8px;">
         <button id="btn-start" class="btn btn-accent">🎙 Start Recording</button>
         <button id="btn-stop" class="btn" disabled>⏹ Stop</button>
         <button id="clearBtn" class="btn">🗑️ Clear</button>
+        <label style="display:flex;align-items:center;gap:4px;color:var(--muted);font-size:12px;">Chunk:
+          <input id="timeslice" type="number" value="5000" min="500" step="500"
+                 style="background:rgba(255,255,255,0.08);border:1px solid var(--stroke);
+                        border-radius:6px;padding:4px 8px;color:var(--text);width:70px;font-size:12px;" />
+        </label>
+        <label style="display:flex;align-items:center;gap:4px;color:var(--muted);font-size:12px;">Overlap:
+          <input id="overlap" type="number" value="500" min="0" max="2000" step="100"
+                 style="background:rgba(255,255,255,0.08);border:1px solid var(--stroke);
+                        border-radius:6px;padding:4px 8px;color:var(--text);width:70px;font-size:12px;" />
+        </label>
+        <div class="spacer"></div>
+        <div id="storage-status" style="color:var(--muted);font-size:11px;">
+          Storage: Loading...
+        </div>
       </div>
     </div>
 
